@@ -1,11 +1,11 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
-import 'dart:convert';
-
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'mint_ui.dart';
 import 'rates.dart';
 import 'theme.dart';
 
@@ -70,6 +70,17 @@ class MintApp extends StatelessWidget {
   }
 }
 
+/// "14:02", the time a figure was weighed.
+String clockTime(DateTime time) =>
+    '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+
+/// A rate's figure without its "Rs " prefix, for the struck slab.
+String bareFigure(String value) =>
+    value.startsWith('Rs ') ? value.substring(3) : value;
+
+String alertSentence(Rate rate, PriceAlert alert) =>
+    '${rate.name} ${alert.above ? 'above' : 'below'} Rs ${formatPkr(alert.target, decimals: rate.isGold ? 0 : 2)}';
+
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
 
@@ -87,7 +98,18 @@ class _DashboardPageState extends State<DashboardPage>
   final Set<String> _favorites = {'gold', 'usd'};
   List<PriceAlert> _alerts = const [];
 
+  static const _tabs = [
+    (MintGlyph.coin, 'Overview'),
+    (MintGlyph.rate, 'Rates'),
+    (MintGlyph.history, 'History'),
+    (MintGlyph.alert, 'Alerts'),
+    (MintGlyph.assay, 'Advisor'),
+  ];
+
   Rate get selectedRate => _rates.firstWhere((rate) => rate.id == _selected);
+
+  Rate _rateFor(String id) =>
+      _rates.firstWhere((rate) => rate.id == id, orElse: () => _rates.first);
 
   @override
   void initState() {
@@ -122,14 +144,36 @@ class _DashboardPageState extends State<DashboardPage>
     _evaluateAlerts();
   }
 
-  Future<void> _refresh() => _controller.refreshManual();
+  /// Weigh again. Speaks only when a new figure was actually struck.
+  Future<void> _refresh() async {
+    final before = _controller.snapshot?.goldFetchedAt;
+    await _controller.refreshManual();
+    final after = _controller.snapshot?.goldFetchedAt;
+    if (!mounted || _controller.error != null || after == null) return;
+    if (after != before) {
+      showMintToast(
+        context,
+        'Weighed.',
+        'Rates current to ${clockTime(after)}.',
+      );
+    }
+  }
+
+  void _addAlert(PriceAlert alert) {
+    setState(() => _alerts = [..._alerts, alert]);
+    _saveAlerts();
+    showMintToast(
+      context,
+      'Kept.',
+      'Rings once when ${alertSentence(_rateFor(alert.rateId), alert)}.',
+    );
+  }
 
   void _openPurchaseCalculator() {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: AppColors.surface,
       builder: (_) => PurchaseCalculatorSheet(gold: _rates.first),
     );
   }
@@ -138,77 +182,42 @@ class _DashboardPageState extends State<DashboardPage>
     final gold = _rates.first;
     final current = gold.amount;
     if (current == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Waiting for the live gold price.')),
-      );
+      showMintToast(context, 'Not yet.', 'Gold has not been weighed yet.');
       return;
     }
+    PriceAlert suggestion(bool above) => PriceAlert(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      rateId: 'gold',
+      above: above,
+      target: current * (above ? 1.015 : .985),
+    );
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      backgroundColor: AppColors.surface,
       builder: (sheetContext) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 28),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Suggested gold alerts', style: AppTextStyles.sectionTitle),
-            const SizedBox(height: 12),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const CircleAvatar(
-                backgroundColor: AppColors.upBackground,
-                child: Icon(Icons.trending_up, color: AppColors.upText),
-              ),
-              title: const Text('A 1.5% upward move'),
-              subtitle: Text(
-                'Above Rs ${formatPkr(current * 1.015, decimals: 0)}',
-              ),
-              trailing: const Icon(Icons.add_circle_outline),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                setState(() {
-                  _alerts = [
-                    ..._alerts,
-                    PriceAlert(
-                      id: DateTime.now().microsecondsSinceEpoch.toString(),
-                      rateId: 'gold',
-                      above: true,
-                      target: current * 1.015,
-                    ),
-                  ];
-                });
-                _saveAlerts();
-              },
+            const SheetHead(
+              title: 'Suggested alerts',
+              subtitle: 'Two marks either side of today’s gold figure.',
             ),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const CircleAvatar(
-                backgroundColor: AppColors.downBackground,
-                child: Icon(Icons.trending_down, color: AppColors.downText),
+            const SizedBox(height: 14),
+            for (final above in [true, false]) ...[
+              _SuggestionRow(
+                isUp: above,
+                title: above ? 'A 1.5% rise' : 'A 1.5% dip',
+                detail:
+                    '${above ? 'Above' : 'Below'} Rs ${formatPkr(current * (above ? 1.015 : .985), decimals: 0)}',
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _addAlert(suggestion(above));
+                },
               ),
-              title: const Text('A 1.5% dip'),
-              subtitle: Text(
-                'Below Rs ${formatPkr(current * .985, decimals: 0)}',
-              ),
-              trailing: const Icon(Icons.add_circle_outline),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                setState(() {
-                  _alerts = [
-                    ..._alerts,
-                    PriceAlert(
-                      id: DateTime.now().microsecondsSinceEpoch.toString(),
-                      rateId: 'gold',
-                      above: false,
-                      target: current * .985,
-                    ),
-                  ];
-                });
-                _saveAlerts();
-              },
-            ),
+              const SizedBox(height: 10),
+            ],
           ],
         ),
       ),
@@ -220,14 +229,7 @@ class _DashboardPageState extends State<DashboardPage>
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      backgroundColor: AppColors.surface,
-      builder: (_) => AlertFormSheet(
-        rates: _rates,
-        onSave: (alert) {
-          setState(() => _alerts = [..._alerts, alert]);
-          _saveAlerts();
-        },
-      ),
+      builder: (_) => AlertFormSheet(rates: _rates, onSave: _addAlert),
     );
   }
 
@@ -287,217 +289,234 @@ class _DashboardPageState extends State<DashboardPage>
             child: IndexedStack(
               index: _tab,
               children: [
-                _overview(),
-                _ratesPage(),
-                _historyPage(),
-                _alertsPage(),
-                _advisorPage(),
+                for (final (i, page) in [
+                  _overview(),
+                  _ratesPage(),
+                  _historyPage(),
+                  _alertsPage(),
+                  _advisorPage(),
+                ].indexed)
+                  TickerMode(enabled: i == _tab, child: page),
               ],
             ),
           ),
         ),
       ),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        child: NavigationBar(
-          selectedIndex: _tab,
-          onDestinationSelected: (index) => setState(() => _tab = index),
-          destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.grid_view_rounded),
-              selectedIcon: Icon(Icons.grid_view_rounded),
-              label: 'Overview',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.wallet_outlined),
-              selectedIcon: Icon(Icons.wallet_rounded),
-              label: 'Rates',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.show_chart_rounded),
-              label: 'History',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.notifications_none_rounded),
-              label: 'Alerts',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.auto_awesome_outlined),
-              selectedIcon: Icon(Icons.auto_awesome),
-              label: 'Advisor',
-            ),
-          ],
-        ),
+      bottomNavigationBar: MintTabBar(
+        items: _tabs,
+        index: _tab,
+        onChanged: (index) => setState(() => _tab = index),
       ),
     );
   }
 
-  Widget _page({required Widget child}) {
-    return Column(
+  /// Every screen: its head, the milled reed, any failure, then the body.
+  Widget _page({
+    required List<Widget> children,
+    String? title,
+    String? asideTop,
+    String? asideBottom,
+  }) {
+    final gold = _rates.first;
+    final weighed = gold.updatedAt;
+    final error = _controller.error;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 40),
       children: [
-        AppHeader(
-          isRefreshing: _controller.isRefreshing,
+        _ScreenHead(
+          title: title,
+          asideTop:
+              asideTop ??
+              (weighed == null
+                  ? 'Not weighed'
+                  : 'Weighed ${clockTime(weighed)}'),
+          asideBottom: asideBottom ?? 'Pakistan · PKR',
+          refreshing: _controller.isRefreshing,
           onRefresh: _refresh,
-          onNotifications: _openAlertSheet,
+          onAlert: title == null ? _openAlertSheet : null,
         ),
-        if (_controller.error != null)
-          _StatusBanner(message: _controller.error!),
-        Expanded(child: child),
+        const Mill(),
+        if (error != null) ...[
+          const SizedBox(height: 14),
+          FailCard(
+            message: error,
+            trusted: gold.amount == null || weighed == null
+                ? null
+                : 'Last figure trusted: gold ${gold.value} ${gold.unit}, weighed ${clockTime(weighed)}.',
+            onRetry: _refresh,
+          ),
+        ],
+        ...children,
       ],
     );
   }
 
   Widget _overview() {
     final gold = _rates.first;
+    final now = DateTime.now();
+    final per10g = gold.amount == null
+        ? '—'
+        : 'Rs ${formatPkr(gold.amount! / gramsPerTola * 10, decimals: 0)}';
     return _page(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-        children: [
-          _DateGreeting(),
-          const SizedBox(height: 16),
-          LiveIndicator(updatedAt: gold.updatedAt, isStale: gold.isStale),
-          const SizedBox(height: 22),
-          Container(
-            padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
-            decoration: BoxDecoration(
-              color: AppColors.teal,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFF0B514C)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Gold 24K · per tola',
-                  style: AppTextStyles.subtitle.copyWith(
-                    color: const Color(0xFFDDEBE6),
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  gold.value,
-                  style: AppTextStyles.hero.copyWith(
-                    color: Colors.white,
-                    fontSize: 38,
-                  ),
-                ),
-                const SizedBox(height: 9),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withAlpha(20),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.white.withAlpha(36)),
-                  ),
-                  child: Text(
-                    '${gold.isUp ? '▲' : '▼'} ${gold.change} today',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
+      children: [
+        const SizedBox(height: 16),
+        Text(dateLine(now).toUpperCase(), style: MintText.label()),
+        const SizedBox(height: 6),
+        Text(
+          '${greeting(now)}.',
+          style: MintText.serif(size: 24, italic: true, height: 1.15),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'The day’s figures, weighed.',
+          style: MintText.body(color: MintColors.mute),
+        ),
+        const SizedBox(height: 14),
+        Slab(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'GOLD 24K · PER TOLA',
+                style: MintText.label(color: MintColors.slabTint),
+              ),
+              const SizedBox(height: 10),
+              _StruckFigure(currency: 'PKR', figure: bareFigure(gold.value)),
+              const SizedBox(height: 8),
+              MoveText(
+                change: gold.change,
+                isUp: gold.isUp,
+                suffix: gold.change == '—' ? 'not yet compared' : 'today',
+                onSlab: true,
+                size: 13,
+              ),
+              const _SlabRule(),
+              Row(
+                children: [
+                  Expanded(
+                    child: _SlabStat(
+                      label: 'Weighed',
+                      value: gold.updatedAt == null
+                          ? '—'
+                          : '${timeAgo(gold.updatedAt!, now)}${gold.isStale ? ' · stale' : ''}',
                     ),
                   ),
-                ),
-              ],
-            ),
+                  _SlabStat(label: 'Per 10 g', value: per10g, end: true),
+                ],
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          EnhancedRateChart(
-            rate: gold,
-            values: _controller.chartValues(gold.id, _range),
-            range: _range,
-            onRangeChanged: _setRange,
-          ),
-          const SizedBox(height: 18),
-          _buildAiInsight(gold),
-          const SizedBox(height: 24),
-          const SectionHeader(title: "Today's rates", label: 'PKR'),
-          const SizedBox(height: 4),
-          ..._rates.map(_rateRow),
-          const SizedBox(height: 20),
-          Text(
-            'Gold is the international spot price converted to PKR. '
-            'Currency rates by ExchangeRate-API. Reference prices only; '
-            'local market rates may differ.',
-            style: AppTextStyles.caption,
-          ),
-        ],
-      ),
+        ),
+        const SizedBox(height: 14),
+        EnhancedRateChart(
+          rate: gold,
+          values: _controller.chartValues(gold.id, _range),
+          range: _range,
+          onRangeChanged: _setRange,
+        ),
+        const SizedBox(height: 14),
+        _buildInsight(gold),
+        SectionRule(
+          number: '01',
+          name: 'Today’s rates',
+          aside: 'the pairs on your counter',
+        ),
+        _ratesTable(_rates),
+        const SizedBox(height: 6),
+        Text(
+          'Gold edge: the pair you are weighing. Tap a pair to see its history.',
+          style: MintText.caption(),
+        ),
+        const SizedBox(height: 18),
+        Text(
+          'Gold is the international spot price converted to PKR. '
+          'Currency rates by ExchangeRate-API. Reference prices only; '
+          'local market rates may differ.',
+          style: MintText.caption(),
+        ),
+      ],
     );
   }
 
   Widget _ratesPage() {
     return _page(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-        children: [
-          Text('Rates', style: AppTextStyles.sectionTitle),
-          const SizedBox(height: 5),
-          Text(
-            'Live market prices in Pakistani Rupees',
-            style: AppTextStyles.subtitle,
-          ),
-          const SizedBox(height: 22),
-          const SectionHeader(title: 'Gold', label: 'PKR'),
-          _rateRow(_rates[0]),
-          const SizedBox(height: 20),
-          const SectionHeader(title: 'Currencies', label: 'PKR'),
-          ..._rates.skip(1).map(_rateRow),
-        ],
-      ),
+      title: 'Rates',
+      children: [
+        const SizedBox(height: 12),
+        Text(
+          'Live market prices in Pakistani rupees.',
+          style: MintText.body(color: MintColors.mute),
+        ),
+        const SectionRule(number: '01', name: 'Gold', aside: 'per tola'),
+        _ratesTable([_rates[0]]),
+        const SectionRule(
+          number: '02',
+          name: 'Currencies',
+          aside: 'one unit, in rupees',
+        ),
+        _ratesTable(_rates.skip(1).toList()),
+        const SizedBox(height: 8),
+        Text(
+          'Starred pairs are the ones you watch. Tap a pair to see its history.',
+          style: MintText.caption(),
+        ),
+      ],
     );
   }
 
   Widget _historyPage() {
-    final past = _pastValues(selectedRate);
+    final rate = selectedRate;
+    final past = _pastValues(rate);
     return _page(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-        children: [
-          Text('History', style: AppTextStyles.sectionTitle),
-          const SizedBox(height: 5),
-          Text(
-            'A clearer view of where rates have been.',
-            style: AppTextStyles.subtitle,
-          ),
-          const SizedBox(height: 20),
-          _selector(),
-          const SizedBox(height: 20),
-          EnhancedRateChart(
-            rate: selectedRate,
-            values: _controller.chartValues(selectedRate.id, _range),
-            range: _range,
-            onRangeChanged: _setRange,
-          ),
-          const SizedBox(height: 28),
-          const SectionHeader(title: 'Past values', label: 'Recent'),
-          if (past.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              child: Text(
-                'Past values will appear here as MINT records each day.',
-                style: AppTextStyles.subtitle,
-              ),
+      title: 'History',
+      children: [
+        const SizedBox(height: 12),
+        Text(
+          'Where each rate has been.',
+          style: MintText.body(color: MintColors.mute),
+        ),
+        const SizedBox(height: 12),
+        MintSegmented<String>(
+          scrollable: true,
+          options: [for (final rate in _rates) (rate.id, rate.code)],
+          selected: _selected,
+          onChanged: (id) => setState(() => _selected = id),
+        ),
+        const SizedBox(height: 14),
+        EnhancedRateChart(
+          rate: rate,
+          values: _controller.chartValues(rate.id, _range),
+          range: _range,
+          onRangeChanged: _setRange,
+        ),
+        SectionRule(
+          number: '01',
+          name: 'Past values',
+          aside: 'each day’s close',
+        ),
+        if (past.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            child: Text(
+              'Past values appear here as MINT records each day.',
+              style: MintText.body(color: MintColors.mute),
             ),
-          ...past.map(
-            (item) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              child: Row(
-                children: [
-                  Expanded(child: Text(item.$1, style: AppTextStyles.subtitle)),
-                  Text(item.$2, style: AppTextStyles.rowTitle),
-                  const SizedBox(width: 14),
-                  ChangePill(change: item.$3, isUp: item.$4),
-                ],
-              ),
-            ),
+          )
+        else
+          _MintTable(
+            headings: const ['Day', 'Close', 'Move'],
+            rows: [
+              for (final item in past)
+                _MintTableRow(
+                  cells: [
+                    Text(item.$1, style: MintText.head(size: 15)),
+                    Text(item.$2, style: MintText.mono(size: 13.5)),
+                    MoveText(change: item.$3, isUp: item.$4),
+                  ],
+                ),
+            ],
           ),
-        ],
-      ),
+      ],
     );
   }
 
@@ -505,41 +524,43 @@ class _DashboardPageState extends State<DashboardPage>
     final active = _alerts.where((alert) => !alert.triggered).toList();
     final triggered = _alerts.where((alert) => alert.triggered).toList();
     return _page(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-        children: [
-          Text('Alerts', style: AppTextStyles.sectionTitle),
-          const SizedBox(height: 5),
-          Text(
-            'Know when a rate reaches your target.',
-            style: AppTextStyles.subtitle,
-          ),
-          const SizedBox(height: 20),
-          if (active.isEmpty) _emptyAlerts() else ...active.map(_alertCard),
-          if (triggered.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            const SectionHeader(title: 'Triggered', label: 'Past alerts'),
-            const SizedBox(height: 12),
-            ...triggered.map(
-              (alert) => Opacity(opacity: .48, child: _alertCard(alert)),
+      title: 'Alerts',
+      asideTop: '${active.length} set',
+      asideBottom: 'ring once',
+      children: [
+        const SizedBox(height: 14),
+        if (active.isEmpty)
+          Porcelain(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Nothing set to ring.',
+                  style: MintText.serif(size: 16, italic: true),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Set a figure and it is weighed with every refresh.',
+                  style: MintText.caption(),
+                ),
+              ],
             ),
-          ],
-          const SizedBox(height: 28),
-          OutlinedButton.icon(
-            onPressed: _openAlertSheet,
-            icon: const Icon(Icons.add),
-            label: const Text('Create alert'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: AppColors.teal,
-              minimumSize: const Size.fromHeight(52),
-              side: const BorderSide(color: AppColors.teal),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14),
-              ),
-            ),
+          )
+        else
+          for (final alert in active) _alertCard(alert),
+        if (triggered.isNotEmpty) ...[
+          const SectionRule(
+            number: '01',
+            name: 'Rung',
+            aside: 'it rang once, then rested',
           ),
+          const SizedBox(height: 8),
+          for (final alert in triggered)
+            Opacity(opacity: .55, child: _alertCard(alert)),
         ],
-      ),
+        const SizedBox(height: 6),
+        MintButton(label: 'Add an alert', onPressed: _openAlertSheet),
+      ],
     );
   }
 
@@ -557,115 +578,89 @@ class _DashboardPageState extends State<DashboardPage>
     );
 
     return _page(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-        children: [
-          Text('MINT Advisor', style: AppTextStyles.sectionTitle),
-          const SizedBox(height: 5),
-          Text(
-            'Explainable insights from live rates and your history.',
-            style: AppTextStyles.subtitle,
-          ),
-          const SizedBox(height: 20),
-          _advisorCard(
-            icon: Icons.auto_awesome,
-            title: 'Market summary',
-            body: values.length < 2
-                ? 'MINT is collecting enough history to explain market movement.'
-                : 'Gold is ${gold.amount != null && gold.amount! >= avg ? 'above' : 'below'} its 30-day average. '
-                      'Recent range: Rs ${formatPkr(low, decimals: 0)}–Rs ${formatPkr(high, decimals: 0)} per tola.',
-            action: 'View gold history',
-            onAction: () => setState(() {
-              _selected = 'gold';
-              _tab = 2;
-            }),
-          ),
-          const SizedBox(height: 12),
-          _advisorCard(
-            icon: Icons.shopping_basket_outlined,
-            title: 'Gold purchase calculator',
-            body: 'Estimate 24K, 22K and 18K value before visiting a jeweller.',
-            action: 'Calculate purchase',
-            onAction: _openPurchaseCalculator,
-          ),
-          const SizedBox(height: 12),
-          _advisorCard(
-            icon: Icons.currency_exchange,
-            title: 'Currency guidance',
-            body:
-                '${usd.name}: ${usd.change == '—' ? 'Waiting for a comparison' : '${usd.change} today'}. '
-                'Exchange-rate movement can affect the PKR gold price.',
-            action: 'Open rates',
-            onAction: () => setState(() => _tab = 1),
-          ),
-          const SizedBox(height: 12),
-          _advisorCard(
-            icon: Icons.notifications_active_outlined,
-            title: 'Suggested alerts',
-            body: gold.amount == null
-                ? 'Waiting for the live gold price.'
-                : 'Watch for gold above Rs ${formatPkr(gold.amount! * 1.015, decimals: 0)} or below Rs ${formatPkr(gold.amount! * .985, decimals: 0)}.',
-            action: 'Create suggested alert',
-            onAction: _openAlertSuggestions,
-          ),
-          const SizedBox(height: 18),
-          Text(
-            'Advisor suggestions use your live and historical market data. '
-            'They are not guaranteed outcomes or personal financial advice.',
-            style: AppTextStyles.caption,
-          ),
-        ],
-      ),
+      title: 'Advisor',
+      asideTop: 'From live rates',
+      asideBottom: 'and your history',
+      children: [
+        const SizedBox(height: 12),
+        Text(
+          'The assayer’s read: what the figures say, and why.',
+          style: MintText.body(color: MintColors.mute),
+        ),
+        const SizedBox(height: 4),
+        _advisorCard(
+          glyph: MintGlyph.rate,
+          label: 'Market summary',
+          body: values.length < 2
+              ? 'MINT is still gathering enough history to read the market.'
+              : 'Gold is ${gold.amount != null && gold.amount! >= avg ? 'above' : 'below'} its 30-day average. '
+                    'Recent range: Rs ${formatPkr(low, decimals: 0)} to Rs ${formatPkr(high, decimals: 0)} per tola.',
+          action: 'View gold history',
+          onAction: () => setState(() {
+            _selected = 'gold';
+            _tab = 2;
+          }),
+        ),
+        _advisorCard(
+          glyph: MintGlyph.calc,
+          label: 'Purchase calculator',
+          body: 'Weigh 24K, 22K and 18K before visiting a jeweller.',
+          action: 'Weigh a purchase',
+          onAction: _openPurchaseCalculator,
+        ),
+        _advisorCard(
+          glyph: MintGlyph.swap,
+          label: 'Currency guidance',
+          body:
+              '${usd.name}: ${usd.change == '—' ? 'not yet compared' : '${usd.isUp ? '▲' : '▼'} ${usd.change} today'}. '
+              'Exchange-rate movement can move the PKR gold price.',
+          action: 'Open rates',
+          onAction: () => setState(() => _tab = 1),
+        ),
+        _advisorCard(
+          glyph: MintGlyph.alert,
+          label: 'Suggested alerts',
+          body: gold.amount == null
+              ? 'Gold has not been weighed yet.'
+              : 'Watch for gold above Rs ${formatPkr(gold.amount! * 1.015, decimals: 0)} or below Rs ${formatPkr(gold.amount! * .985, decimals: 0)}.',
+          action: 'Set a suggested alert',
+          onAction: _openAlertSuggestions,
+        ),
+        const SizedBox(height: 18),
+        Text(
+          'Advisor suggestions use your live and historical market data. '
+          'They are not guaranteed outcomes or personal financial advice.',
+          style: MintText.caption(),
+        ),
+      ],
     );
   }
 
   Widget _advisorCard({
-    required IconData icon,
-    required String title,
+    required MintGlyph glyph,
+    required String label,
     required String body,
     required String action,
     required VoidCallback onAction,
   }) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Porcelain(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: const BoxDecoration(
-                    color: AppColors.mint,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(icon, color: AppColors.teal, size: 20),
-                ),
-                const SizedBox(width: 10),
-                Expanded(child: Text(title, style: AppTextStyles.rowTitle)),
+                _Disk(child: MintIcon(glyph, size: 20)),
+                const SizedBox(width: 12),
+                Expanded(child: Text(label, style: MintText.head())),
               ],
             ),
-            const SizedBox(height: 12),
-            Text(body, style: AppTextStyles.subtitle),
-            const SizedBox(height: 12),
-            TextButton(
-              onPressed: onAction,
-              style: TextButton.styleFrom(
-                foregroundColor: AppColors.teal,
-                padding: EdgeInsets.zero,
-                minimumSize: const Size(44, 44),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(action),
-                  const SizedBox(width: 4),
-                  const Icon(Icons.arrow_forward_rounded, size: 16),
-                ],
-              ),
-            ),
+            const SizedBox(height: 10),
+            Text(body, style: MintText.body()),
+            const SizedBox(height: 2),
+            MintLink(label: action, onTap: onAction),
           ],
         ),
       ),
@@ -673,10 +668,7 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Widget _alertCard(PriceAlert alert) {
-    final rate = _rates.firstWhere(
-      (item) => item.id == alert.rateId,
-      orElse: () => _rates.first,
-    );
+    final rate = _rateFor(alert.rateId);
     final current = rate.amount ?? 0;
     final progress = alert.above
         ? (current / alert.target).clamp(0.0, 1.0)
@@ -686,10 +678,11 @@ class _DashboardPageState extends State<DashboardPage>
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: AlertCard(
-        title:
-            '${rate.name} goes ${alert.above ? 'above' : 'below'} Rs ${formatPkr(alert.target, decimals: rate.isGold ? 0 : 2)}',
-        progress: progress,
+        title: alertSentence(rate, alert),
+        isUp: alert.above,
+        progress: progress.toDouble(),
         enabled: alert.enabled,
+        triggered: alert.triggered,
         isGold: rate.isGold,
         onChanged: (enabled) {
           setState(() {
@@ -707,120 +700,95 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  Widget _emptyAlerts() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 28),
-      child: Column(
+  Widget _buildInsight(Rate gold) {
+    final values = _controller.chartValues(gold.id, '1W');
+    final change = values.length < 2
+        ? null
+        : (values.last - values.first) / values.first * 100;
+    final title = change == null
+        ? 'Still weighing the market.'
+        : change < -1
+        ? 'Consider a small, staged buy.'
+        : change > 1
+        ? 'Consider waiting for a pullback.'
+        : 'Hold, and compare before buying.';
+    final detail = change == null
+        ? 'MINT needs more live history before it can suggest anything useful.'
+        : 'Gold moved ${change < 0 ? '▼' : '▲'} ${change.abs().toStringAsFixed(2)}% over the week. '
+              'A trend signal, not financial advice.';
+    return Porcelain(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(
-            Icons.notifications_none_rounded,
-            size: 38,
-            color: AppColors.teal,
-          ),
-          const SizedBox(height: 10),
-          Text('No alerts yet', style: AppTextStyles.rowTitle),
-          const SizedBox(height: 4),
-          Text(
-            'Create one to monitor a target price.',
-            style: AppTextStyles.caption,
+          const _Disk(child: MintIcon(MintGlyph.assay, size: 20)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('THE ASSAYER’S READ', style: MintText.label()),
+                const SizedBox(height: 4),
+                Text(title, style: MintText.head()),
+                const SizedBox(height: 4),
+                Text(detail, style: MintText.caption()),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildAiInsight(Rate gold) {
-    final values = _controller.chartValues(gold.id, '1W');
-    final change = values.length < 2
-        ? null
-        : (values.last - values.first) / values.first * 100;
-    final title = change == null
-        ? 'AI insight is learning the market'
-        : change < -1
-        ? 'Consider a small, staged buy'
-        : change > 1
-        ? 'Consider waiting for a pullback'
-        : 'Hold and compare before buying';
-    final detail = change == null
-        ? 'MINT needs more live history before making a useful suggestion.'
-        : 'Gold moved ${change.abs().toStringAsFixed(2)}% over the selected period. '
-              'This is a trend signal, not financial advice.';
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Icon(Icons.auto_awesome, color: AppColors.teal),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
+  Widget _ratesTable(List<Rate> rates) {
+    final now = DateTime.now();
+    return _MintTable(
+      headings: const ['Pair', 'Rate', '24 h'],
+      rows: [
+        for (final rate in rates)
+          _MintTableRow(
+            highlighted: rate.id == _selected,
+            onTap: () => setState(() {
+              _selected = rate.id;
+              _tab = 2;
+            }),
+            cells: [
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          rate.name,
+                          style: MintText.head(size: 15),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      _Star(
+                        on: _favorites.contains(rate.id),
+                        onTap: () => setState(
+                          () => _favorites.contains(rate.id)
+                              ? _favorites.remove(rate.id)
+                              : _favorites.add(rate.id),
+                        ),
+                      ),
+                    ],
+                  ),
                   Text(
-                    'MINT AI guide',
-                    style: AppTextStyles.caption.copyWith(
-                      color: AppColors.teal,
-                      fontWeight: FontWeight.w700,
+                    rate.updatedAt == null
+                        ? 'not weighed yet'
+                        : '${rate.unit.replaceFirst('/ ', 'per ')} · ${timeAgo(rate.updatedAt!, now)}${rate.isStale ? ' · stale' : ''}',
+                    style: MintText.caption(
+                      color: rate.isStale ? MintColors.hoji : MintColors.mute,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(title, style: AppTextStyles.rowTitle),
-                  const SizedBox(height: 4),
-                  Text(detail, style: AppTextStyles.caption),
                 ],
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _selector() {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: SegmentedButton<String>(
-        segments: _rates
-            .map(
-              (rate) => ButtonSegment(value: rate.id, label: Text(rate.code)),
-            )
-            .toList(),
-        selected: {_selected},
-        onSelectionChanged: (value) => setState(() => _selected = value.first),
-        style: ButtonStyle(
-          visualDensity: VisualDensity.compact,
-          side: const WidgetStatePropertyAll(
-            BorderSide(color: AppColors.divider),
+              Text(rate.value, style: MintText.mono(size: 13.5)),
+              MoveText(change: rate.change, isUp: rate.isUp),
+            ],
           ),
-          backgroundColor: WidgetStateProperty.resolveWith(
-            (states) => states.contains(WidgetState.selected)
-                ? AppColors.teal
-                : AppColors.surface,
-          ),
-          foregroundColor: WidgetStateProperty.resolveWith(
-            (states) => states.contains(WidgetState.selected)
-                ? Colors.white
-                : AppColors.secondary,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _rateRow(Rate rate) {
-    return RateRow(
-      rate: rate,
-      favorite: _favorites.contains(rate.id),
-      onFavorite: () => setState(
-        () => _favorites.contains(rate.id)
-            ? _favorites.remove(rate.id)
-            : _favorites.add(rate.id),
-      ),
-      onTap: () => setState(() {
-        _selected = rate.id;
-        _tab = 2;
-      }),
+      ],
     );
   }
 
@@ -849,144 +817,72 @@ class _DashboardPageState extends State<DashboardPage>
   }
 }
 
-class _StatusBanner extends StatelessWidget {
-  const _StatusBanner({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      color: AppColors.goldTint,
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
-      child: Text(message, style: AppTextStyles.caption),
-    );
-  }
-}
-
-class MintLogo extends StatelessWidget {
-  const MintLogo({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 38,
-      height: 38,
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        shape: BoxShape.circle,
-        border: Border.all(color: AppColors.mint, width: 3),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x140F5C58),
-            blurRadius: 8,
-            offset: Offset(0, 3),
-          ),
-        ],
-      ),
-      child: CustomPaint(painter: _MintLogoPainter()),
-    );
-  }
-}
-
-class _MintLogoPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final mark = Paint()
-      ..color = AppColors.teal
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round
-      ..style = PaintingStyle.stroke;
-    final base = Paint()
-      ..color = AppColors.gold
-      ..strokeWidth = 2.4
-      ..strokeCap = StrokeCap.round;
-    canvas.drawLine(
-      Offset(size.width * .24, size.height * .68),
-      Offset(size.width * .24, size.height * .32),
-      mark,
-    );
-    canvas.drawLine(
-      Offset(size.width * .24, size.height * .32),
-      Offset(size.width * .50, size.height * .58),
-      mark,
-    );
-    canvas.drawLine(
-      Offset(size.width * .50, size.height * .58),
-      Offset(size.width * .76, size.height * .32),
-      mark,
-    );
-    canvas.drawLine(
-      Offset(size.width * .76, size.height * .32),
-      Offset(size.width * .76, size.height * .68),
-      mark,
-    );
-    canvas.drawLine(
-      Offset(size.width * .38, size.height * .76),
-      Offset(size.width * .62, size.height * .76),
-      base,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class AppHeader extends StatelessWidget {
-  const AppHeader({
-    required this.isRefreshing,
+/// The head of every screen: the wordmark (or the screen's title), when it
+/// was weighed, and the way to weigh again.
+class _ScreenHead extends StatelessWidget {
+  const _ScreenHead({
+    required this.title,
+    required this.asideTop,
+    required this.asideBottom,
+    required this.refreshing,
     required this.onRefresh,
-    required this.onNotifications,
-    super.key,
+    this.onAlert,
   });
 
-  final bool isRefreshing;
+  final String? title;
+  final String asideTop;
+  final String asideBottom;
+  final bool refreshing;
   final VoidCallback onRefresh;
-  final VoidCallback onNotifications;
+  final VoidCallback? onAlert;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 52,
-      decoration: const BoxDecoration(
-        color: AppColors.surface,
-        border: Border(bottom: BorderSide(color: AppColors.divider)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 6),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          const MintLogo(),
-          const SizedBox(width: 9),
-          Text(
-            'MINT',
-            style: GoogleFonts.inter(
-              color: AppColors.teal,
-              fontSize: 18,
-              fontWeight: FontWeight.w800,
-              letterSpacing: 2,
+          Expanded(
+            child: title == null
+                ? const MintWordmark()
+                : Text(title!, style: MintText.display()),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(text: '${asideTop.toUpperCase()}\n'),
+                  TextSpan(
+                    text: asideBottom.toUpperCase(),
+                    style: const TextStyle(color: MintColors.mute),
+                  ),
+                ],
+              ),
+              textAlign: TextAlign.right,
+              style: MintText.label(color: MintColors.ink)
+                  .copyWith(fontWeight: FontWeight.w600, height: 1.4),
             ),
           ),
-          const Spacer(),
-          IconButton(
-            onPressed: onNotifications,
-            tooltip: 'Notifications',
-            icon: const Badge(
-              smallSize: 7,
-              backgroundColor: AppColors.down,
-              child: Icon(Icons.notifications_none_rounded),
+          const SizedBox(width: 10),
+          if (onAlert != null) ...[
+            RoundButton(
+              tooltip: 'Set an alert',
+              onPressed: onAlert,
+              child: const MintIcon(MintGlyph.alert),
             ),
-          ),
-          IconButton(
-            onPressed: isRefreshing ? null : onRefresh,
-            tooltip: 'Refresh rates',
-            icon: isRefreshing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.refresh_rounded),
+            const SizedBox(width: 8),
+          ],
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: RoundButton(
+              tooltip: 'Weigh again',
+              onPressed: refreshing ? null : onRefresh,
+              child: refreshing
+                  ? const Whisk(size: 22)
+                  : const MintIcon(MintGlyph.rate),
+            ),
           ),
         ],
       ),
@@ -994,243 +890,307 @@ class AppHeader extends StatelessWidget {
   }
 }
 
-class _DateGreeting extends StatelessWidget {
-  _DateGreeting();
+/// "Mint" in Fraunces italic, poured from spearmint into matcha.
+class MintWordmark extends StatelessWidget {
+  const MintWordmark({this.size = 54, super.key});
 
-  final DateTime now = DateTime.now();
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.bottomLeft,
+      child: ShaderMask(
+        blendMode: BlendMode.srcIn,
+        shaderCallback: (bounds) => const LinearGradient(
+          colors: [
+            Color(0xFF1D6650),
+            Color(0xFF1F6A4F),
+            Color(0xFF3F6A22),
+            Color(0xFF4C6A1B),
+          ],
+          stops: [0, .4, .78, 1],
+        ).createShader(bounds),
+        child: Padding(
+          padding: const EdgeInsets.only(right: 6, bottom: 4),
+          child: Text(
+            'Mint',
+            style: MintText.display(size: size, color: Colors.white),
+            semanticsLabel: 'MINT',
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A figure struck on the slab: small mono currency, big Fraunces number.
+class _StruckFigure extends StatelessWidget {
+  const _StruckFigure({required this.currency, required this.figure});
+
+  final String currency;
+  final String figure;
+
+  @override
+  Widget build(BuildContext context) {
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 9, right: 6),
+            child: Text(
+              currency,
+              style: MintText.mono(
+                size: 12,
+                weight: FontWeight.w600,
+                color: MintColors.slabTint,
+                letterSpacing: 1,
+              ),
+            ),
+          ),
+          Text(figure, style: MintText.figure()),
+        ],
+      ),
+    );
+  }
+}
+
+class _SlabRule extends StatelessWidget {
+  const _SlabRule();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    height: .75,
+    margin: const EdgeInsets.only(top: 12, bottom: 10),
+    color: MintColors.slabTint.withAlpha(102),
+  );
+}
+
+class _SlabStat extends StatelessWidget {
+  const _SlabStat({required this.label, required this.value, this.end = false});
+
+  final String label;
+  final String value;
+  final bool end;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: end ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+    children: [
+      Text(
+        label.toUpperCase(),
+        style: MintText.label(color: MintColors.slabTint),
+      ),
+      const SizedBox(height: 2),
+      Text(
+        value,
+        style: MintText.mono(
+          size: 14,
+          weight: FontWeight.w500,
+          color: MintColors.stock,
+        ),
+      ),
+    ],
+  );
+}
+
+/// A small sunken disk holding an icon.
+class _Disk extends StatelessWidget {
+  const _Disk({required this.child});
+
+  static const size = 42.0;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: size,
+    height: size,
+    child: Well(
+      radius: size / 2,
+      padding: EdgeInsets.zero,
+      child: Center(child: child),
+    ),
+  );
+}
+
+class _Star extends StatelessWidget {
+  const _Star({required this.on, required this.onTap});
+
+  final bool on;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: on ? 'Stop watching' : 'Watch',
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Icon(
+          on ? Icons.star_rounded : Icons.star_border_rounded,
+          size: 17,
+          color: on ? MintColors.gold : MintColors.glazeDeep,
+        ),
+      ),
+    ),
+  );
+}
+
+/// A ledger table: mono heads over an ink rule, glaze hairlines between rows.
+/// The highlighted row carries a powder band and a gold edge (`table.rates`).
+class _MintTable extends StatelessWidget {
+  const _MintTable({required this.headings, required this.rows});
+
+  final List<String> headings;
+  final List<_MintTableRow> rows;
+
+  static const flex = [5, 3, 2];
 
   @override
   Widget build(BuildContext context) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          dateLine(now).toUpperCase(),
-          style: GoogleFonts.inter(
-            color: AppColors.secondary,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.1,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          '${greeting(now)}.',
-          style: GoogleFonts.inter(
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -.5,
-            color: AppColors.primary,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          'Here’s what’s moving in your market today.',
-          style: AppTextStyles.subtitle,
-        ),
-      ],
-    );
-  }
-}
-
-class LiveIndicator extends StatelessWidget {
-  const LiveIndicator({this.updatedAt, this.isStale = false, super.key});
-
-  final DateTime? updatedAt;
-  final bool isStale;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
       children: [
         Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: isStale ? AppColors.amber : AppColors.up,
-            shape: BoxShape.circle,
+          padding: const EdgeInsets.fromLTRB(10, 4, 10, 4),
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: MintColors.ink, width: 1.5),
+            ),
+          ),
+          child: Row(
+            children: [
+              for (var i = 0; i < headings.length; i++)
+                Expanded(
+                  flex: flex[i],
+                  child: Text(
+                    headings[i].toUpperCase(),
+                    textAlign: i == 0 ? TextAlign.left : TextAlign.right,
+                    style: MintText.label(size: 10)
+                        .copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+            ],
           ),
         ),
-        const SizedBox(width: 8),
-        Text(
-          updatedAt == null
-              ? 'Waiting for first update'
-              : 'Updated ${timeAgo(updatedAt!, DateTime.now())}',
-          style: AppTextStyles.caption,
-        ),
-        const Spacer(),
-        const Icon(
-          Icons.location_on_outlined,
-          size: 15,
-          color: AppColors.secondary,
-        ),
-        const SizedBox(width: 4),
-        Text('Pakistan · PKR', style: AppTextStyles.caption),
+        ...rows,
       ],
     );
   }
 }
 
-class ChangePill extends StatelessWidget {
-  const ChangePill({
-    required this.change,
-    required this.isUp,
-    this.label,
-    super.key,
+class _MintTableRow extends StatelessWidget {
+  const _MintTableRow({
+    required this.cells,
+    this.highlighted = false,
+    this.onTap,
   });
 
-  final String change;
-  final bool isUp;
-  final String? label;
+  final List<Widget> cells;
+  final bool highlighted;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final neutral = change == '—';
-    final foreground = neutral
-        ? AppColors.secondary
-        : (isUp ? AppColors.upText : AppColors.downText);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+    final row = Container(
+      constraints: const BoxConstraints(minHeight: 52),
+      padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
       decoration: BoxDecoration(
-        color: neutral
-            ? AppColors.mint
-            : (isUp ? AppColors.upBackground : AppColors.downBackground),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        '${neutral ? '' : (isUp ? '▲ ' : '▼ ')}$change${label == null ? '' : ' $label'}',
-        style: TextStyle(
-          color: foreground,
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
+        color: highlighted ? MintColors.hiRow : null,
+        border: const Border(
+          bottom: BorderSide(color: MintColors.glaze, width: .75),
         ),
       ),
+      child: Row(
+        children: [
+          for (var i = 0; i < cells.length; i++)
+            Expanded(
+              flex: _MintTable.flex[i],
+              child: Align(
+                alignment: i == 0
+                    ? Alignment.centerLeft
+                    : Alignment.centerRight,
+                child: cells[i],
+              ),
+            ),
+        ],
+      ),
     );
+    final body = highlighted
+        ? Stack(
+            children: [
+              row,
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: .75,
+                child: Container(width: 4, color: MintColors.gold),
+              ),
+            ],
+          )
+        : row;
+    return onTap == null
+        ? body
+        : Semantics(
+            button: true,
+            selected: highlighted,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: body,
+            ),
+          );
   }
 }
 
-class SectionHeader extends StatelessWidget {
-  const SectionHeader({required this.title, required this.label, super.key});
-
-  final String title;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Text(title, style: AppTextStyles.sectionTitle),
-        const Spacer(),
-        Text(label, style: AppTextStyles.caption),
-      ],
-    );
-  }
-}
-
-class RateRow extends StatelessWidget {
-  const RateRow({
-    required this.rate,
-    required this.favorite,
-    required this.onFavorite,
+class _SuggestionRow extends StatelessWidget {
+  const _SuggestionRow({
+    required this.isUp,
+    required this.title,
+    required this.detail,
     required this.onTap,
-    super.key,
   });
 
-  final Rate rate;
-  final bool favorite;
-  final VoidCallback onFavorite;
+  final bool isUp;
+  final String title;
+  final String detail;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final iconColor = rate.isGold ? AppColors.gold : AppColors.teal;
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        constraints: const BoxConstraints(minHeight: 68),
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: AppColors.divider)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: rate.isGold ? AppColors.goldTint : AppColors.mint,
-                shape: BoxShape.circle,
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                rate.code,
-                style: TextStyle(
-                  color: iconColor,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12,
-                ),
-              ),
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: Porcelain(
+      child: Row(
+        children: [
+          _Disk(
+            child: Text(
+              isUp ? '▲' : '▼',
+              style: MintText.mono(size: 14, color: MintColors.move(isUp)),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(rate.name, style: AppTextStyles.rowTitle),
-                      ),
-                      const SizedBox(width: 3),
-                      IconButton(
-                        onPressed: onFavorite,
-                        tooltip: favorite ? 'Remove favorite' : 'Add favorite',
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 40,
-                          minHeight: 40,
-                        ),
-                        icon: Icon(
-                          favorite
-                              ? Icons.star_rounded
-                              : Icons.star_border_rounded,
-                          size: 17,
-                          color: favorite
-                              ? AppColors.gold
-                              : AppColors.secondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    rate.updatedAt == null
-                        ? 'Waiting for data'
-                        : 'Updated ${timeAgo(rate.updatedAt!, DateTime.now())}',
-                    style: rate.isStale
-                        ? AppTextStyles.caption.copyWith(color: AppColors.amber)
-                        : AppTextStyles.caption,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Text(title, style: MintText.head()),
                 Text(
-                  rate.value,
-                  style: AppTextStyles.rowTitle.copyWith(fontSize: 14),
+                  detail,
+                  style: MintText.mono(size: 12.5, color: MintColors.mute),
                 ),
-                Text(rate.unit, style: AppTextStyles.caption),
-                const SizedBox(height: 2),
-                ChangePill(change: rate.change, isUp: rate.isUp),
               ],
             ),
-          ],
-        ),
+          ),
+          const MintIcon(MintGlyph.plus, size: 20),
+        ],
       ),
-    );
-  }
+    ),
+  );
 }
 
 class EnhancedRateChart extends StatefulWidget {
@@ -1246,6 +1206,14 @@ class EnhancedRateChart extends StatefulWidget {
   final List<double> values;
   final String range;
   final ValueChanged<String> onRangeChanged;
+
+  static const ranges = ['1W', '1M', '3M', '1Y'];
+  static const rangeWords = {
+    '1W': 'this week',
+    '1M': 'this month',
+    '3M': 'in three months',
+    '1Y': 'this year',
+  };
 
   @override
   State<EnhancedRateChart> createState() => _EnhancedRateChartState();
@@ -1274,7 +1242,6 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
       curve: Curves.easeOutCubic,
     );
     _drawController.addListener(_repaintChart);
-    _pulseController.addListener(_repaintChart);
     _drawController.forward();
   }
 
@@ -1287,7 +1254,7 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.rate.id != widget.rate.id ||
         oldWidget.range != widget.range ||
-        oldWidget.values != widget.values) {
+        !listEquals(oldWidget.values, widget.values)) {
       _selectedIndex = null;
       _drawController.forward(from: 0);
     }
@@ -1296,274 +1263,368 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
   @override
   void dispose() {
     _drawController.removeListener(_repaintChart);
-    _pulseController.removeListener(_repaintChart);
     _drawController.dispose();
     _pulseController.dispose();
     super.dispose();
   }
 
+  String _money(double value) =>
+      'Rs ${formatPkr(value, decimals: widget.rate.isGold ? 0 : 2)}';
+
   @override
   Widget build(BuildContext context) {
     final values = downsample(widget.values, 120);
-    return Column(
-      children: [
-        SizedBox(
-          height: 220,
-          child: values.length < 2
-              ? Center(
-                  child: Text(
-                    'Loading price history…',
-                    style: AppTextStyles.caption,
-                  ),
-                )
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    return GestureDetector(
-                      onPanDown: (details) => _selectPoint(
-                        details.localPosition,
-                        constraints.maxWidth,
-                        values.length,
-                      ),
-                      onPanUpdate: (details) => _selectPoint(
-                        details.localPosition,
-                        constraints.maxWidth,
-                        values.length,
-                      ),
-                      onTapDown: (details) => _selectPoint(
-                        details.localPosition,
-                        constraints.maxWidth,
-                        values.length,
-                      ),
-                      onTapCancel: () => setState(() => _selectedIndex = null),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          CustomPaint(
-                            size: Size(constraints.maxWidth, 220),
-                            painter: _EnhancedChartPainter(
-                              values: values,
-                              rateId: widget.rate.id,
-                              selectedIndex: _selectedIndex,
-                              drawProgress: _drawAnimation.value,
-                              pulseProgress: _pulseController.value,
-                            ),
-                          ),
-                          if (_selectedIndex != null)
-                            Positioned(
-                              left: _tooltipLeft(
-                                constraints.maxWidth,
-                                _selectedIndex!,
-                                values.length,
+    final hasData = values.length >= 2;
+    final change = hasData ? (values.last / values.first - 1) * 100 : null;
+    return Porcelain(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${widget.rate.name.toUpperCase()} · ${widget.range}',
+                  style: MintText.label(),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              MintSegmented<String>(
+                mini: true,
+                options: [for (final r in EnhancedRateChart.ranges) (r, r)],
+                selected: widget.range,
+                onChanged: widget.onRangeChanged,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (change != null)
+            Row(
+              children: [
+                Text(
+                  '${_money(values.last)}  ',
+                  style: MintText.mono(size: 12, weight: FontWeight.w600),
+                ),
+                MoveText(
+                  change: '${change.abs().toStringAsFixed(2)}%',
+                  isUp: change >= 0,
+                  suffix: EnhancedRateChart.rangeWords[widget.range],
+                ),
+              ],
+            ),
+          SizedBox(
+            height: 180,
+            child: !hasData
+                ? Center(
+                    child: Text(
+                      'Gathering price history…',
+                      style: MintText.caption(),
+                    ),
+                  )
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final width = constraints.maxWidth;
+                      void select(Offset p) =>
+                          _selectPoint(p, width, values.length);
+                      return GestureDetector(
+                        onPanDown: (d) => select(d.localPosition),
+                        onPanUpdate: (d) => select(d.localPosition),
+                        onTapDown: (d) => select(d.localPosition),
+                        onTapCancel: () =>
+                            setState(() => _selectedIndex = null),
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            RepaintBoundary(
+                              child: CustomPaint(
+                                size: Size(width, 180),
+                                painter: _EnhancedChartPainter(
+                                  values: values,
+                                  selectedIndex: _selectedIndex,
+                                  drawProgress: _drawAnimation.value,
+                                ),
                               ),
-                              top: 2,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 5,
+                            ),
+                            if (_drawAnimation.value > .98)
+                              CustomPaint(
+                                size: Size(width, 180),
+                                painter: _PulsePainter(
+                                  values: values,
+                                  pulse: _pulseController,
                                 ),
-                                decoration: BoxDecoration(
-                                  color: AppColors.primary,
-                                  borderRadius: BorderRadius.circular(8),
+                              ),
+                            if (_selectedIndex != null)
+                              Positioned(
+                                left: _tooltipLeft(
+                                  width,
+                                  _selectedIndex!,
+                                  values.length,
                                 ),
-                                child: Text(
-                                  'Rs ${formatPkr(values[_selectedIndex!], decimals: widget.rate.isGold ? 0 : 2)}',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w700,
+                                top: 0,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: MintColors.ink,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(
+                                    _money(values[_selectedIndex!]),
+                                    style: MintText.mono(
+                                      size: 10.5,
+                                      weight: FontWeight.w600,
+                                      color: MintColors.stock,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-        ),
-        const SizedBox(height: 4),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: ['1W', '1M', '3M', '1Y'].map((item) {
-            final selected = widget.range == item;
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: ChoiceChip(
-                label: Text(item),
-                selected: selected,
-                showCheckmark: false,
-                onSelected: (_) => widget.onRangeChanged(item),
-                selectedColor: AppColors.teal,
-                backgroundColor: Colors.transparent,
-                side: const BorderSide(color: AppColors.divider),
-                labelStyle: TextStyle(
-                  color: selected ? Colors.white : AppColors.secondary,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          if (hasData)
+            Container(
+              margin: const EdgeInsets.only(top: 6),
+              padding: const EdgeInsets.only(top: 8),
+              decoration: const BoxDecoration(
+                border: Border(
+                  top: BorderSide(color: MintColors.glaze, width: .75),
                 ),
               ),
-            );
-          }).toList(),
-        ),
-      ],
+              child: Row(
+                children: [
+                  Expanded(child: _stat('Open', _money(values.first))),
+                  Expanded(
+                    child: _stat('High', _money(values.reduce(math.max))),
+                  ),
+                  Expanded(
+                    child: _stat(
+                      'Low',
+                      _money(values.reduce(math.min)),
+                      end: true,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 
+  Widget _stat(String label, String value, {bool end = false}) => Column(
+    crossAxisAlignment: end ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+    children: [
+      Text(label.toUpperCase(), style: MintText.label()),
+      const SizedBox(height: 1),
+      FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(value, style: MintText.mono(weight: FontWeight.w500)),
+      ),
+    ],
+  );
+
   void _selectPoint(Offset position, double width, int count) {
-    const left = 44.0;
-    const right = 8.0;
-    final chartWidth = width - left - right;
-    final ratio = ((position.dx - left) / chartWidth)
+    final chartWidth =
+        width - _EnhancedChartPainter.left - _EnhancedChartPainter.right;
+    final ratio = ((position.dx - _EnhancedChartPainter.left) / chartWidth)
         .clamp(0.0, 1.0)
         .toDouble();
     setState(() => _selectedIndex = (ratio * (count - 1)).round());
   }
 
   double _tooltipLeft(double width, int index, int count) {
-    const left = 44.0;
-    const right = 8.0;
-    final chartWidth = width - left - right;
-    final x = left + chartWidth * index / (count - 1);
-    return (x - 42).clamp(0.0, width - 84);
+    final chartWidth =
+        width - _EnhancedChartPainter.left - _EnhancedChartPainter.right;
+    final x = _EnhancedChartPainter.left + chartWidth * index / (count - 1);
+    return (x - 42).clamp(0.0, width - 96);
   }
+}
+
+/// The chart: a deep line over powder that lies thinner toward the base, the
+/// latest figure ringed in gold, values on the right in mono.
+/// The latest figure, ringed in gold and breathing. Repaints on its own.
+class _PulsePainter extends CustomPainter {
+  _PulsePainter({required this.values, required this.pulse})
+    : super(repaint: pulse);
+
+  final List<double> values;
+  final Animation<double> pulse;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final latest = _EnhancedChartPainter.pointAt(
+      values,
+      values.length - 1,
+      size,
+    );
+    final t = pulse.value;
+    canvas.drawCircle(
+      latest,
+      7 + 5 * t,
+      Paint()..color = MintColors.gold.withValues(alpha: .28 * (1 - t)),
+    );
+    canvas.drawCircle(latest, 5.5, Paint()..color = MintColors.stock);
+    canvas.drawCircle(
+      latest,
+      5.5,
+      Paint()
+        ..color = MintColors.gold
+        ..strokeWidth = 2.5
+        ..style = PaintingStyle.stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _PulsePainter old) => old.values != values;
 }
 
 class _EnhancedChartPainter extends CustomPainter {
   _EnhancedChartPainter({
     required this.values,
-    required this.rateId,
     required this.selectedIndex,
     required this.drawProgress,
-    required this.pulseProgress,
   });
 
+  static const left = 2.0;
+  static const right = 46.0;
+  static const top = 24.0;
+  static const bottom = 20.0;
+
   final List<double> values;
-  final String rateId;
   final int? selectedIndex;
   final double drawProgress;
-  final double pulseProgress;
+
+  /// Where value [i] sits on the chart: one formula for the line and the pulse.
+  static Offset pointAt(List<double> values, int i, Size size) {
+    var lo = values.reduce(math.min);
+    var hi = values.reduce(math.max);
+    final pad = (hi - lo) * .12;
+    lo -= pad;
+    hi += pad;
+    final chartWidth = size.width - left - right;
+    final chartHeight = size.height - top - bottom;
+    return Offset(
+      left + chartWidth * i / (values.length - 1),
+      top + chartHeight * (1 - (hi == lo ? .5 : (values[i] - lo) / (hi - lo))),
+    );
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    const left = 44.0;
-    const right = 8.0;
-    const top = 34.0;
-    const bottom = 24.0;
     final chartWidth = size.width - left - right;
     final chartHeight = size.height - top - bottom;
-    final lineColor = ChartColors.forRate(rateId);
-    final lo = values.reduce(math.min);
-    final hi = values.reduce(math.max);
-    final grid = Paint()
-      ..color = AppColors.divider
-      ..strokeWidth = 1;
+    final base = size.height - bottom;
+    var lo = values.reduce(math.min);
+    var hi = values.reduce(math.max);
+    final pad = (hi - lo) * .12;
+    lo -= pad;
+    hi += pad;
+    double yOf(double v) =>
+        top + chartHeight * (1 - (hi == lo ? .5 : (v - lo) / (hi - lo)));
 
+    final grid = Paint()
+      ..color = MintColors.glazeDeep
+      ..strokeWidth = .75;
     for (var i = 0; i < 4; i++) {
       final y = top + chartHeight * i / 3;
-      _dashedLine(canvas, Offset(left, y), Offset(size.width - right, y), grid);
-      final labelValue = hi - (hi - lo) * i / 3;
-      _axisLabel(canvas, _axisLabelValue(labelValue), Offset(0, y - 6), 40);
+      _dashedLine(
+        canvas,
+        Offset(left, y),
+        Offset(size.width - right + 6, y),
+        grid,
+      );
+      _label(
+        canvas,
+        _axisValue(hi - (hi - lo) * i / 3),
+        Offset(size.width - right + 10, y - 7),
+      );
     }
-
-    const labels = ['Start', 'Mid', 'Now'];
-    for (var i = 0; i < labels.length; i++) {
+    const xs = ['Start', 'Mid', 'Now'];
+    for (var i = 0; i < xs.length; i++) {
       final x = left + chartWidth * i / 2;
-      _axisLabel(canvas, labels[i], Offset(x - 12, size.height - 17), 34);
+      _label(
+        canvas,
+        xs[i],
+        Offset(i == 0 ? x : x - (i == 1 ? 12 : 22), size.height - 14),
+      );
     }
 
     final points = [
-      for (var i = 0; i < values.length; i++)
-        Offset(
-          left + chartWidth * i / (values.length - 1),
-          top +
-              chartHeight *
-                  (1 - (hi == lo ? .5 : (values[i] - lo) / (hi - lo))),
-        ),
+      for (var i = 0; i < values.length; i++) pointAt(values, i, size),
     ];
-
     final path = Path()..moveTo(points.first.dx, points.first.dy);
     for (var i = 1; i < points.length; i++) {
       final previous = points[i - 1];
       final current = points[i];
-      final midpoint = (previous.dx + current.dx) / 2;
-      path.cubicTo(
-        midpoint,
-        previous.dy,
-        midpoint,
-        current.dy,
-        current.dx,
-        current.dy,
-      );
+      final mid = (previous.dx + current.dx) / 2;
+      path.cubicTo(mid, previous.dy, mid, current.dy, current.dx, current.dy);
     }
 
-    final fill = Path.from(path)
-      ..lineTo(size.width - right, size.height - bottom)
-      ..lineTo(left, size.height - bottom)
-      ..close();
     canvas.save();
     canvas.clipRect(
       Rect.fromLTWH(
         left,
         0,
-        (chartWidth * drawProgress).clamp(0.0, chartWidth),
+        (chartWidth * drawProgress).clamp(0.0, chartWidth) + 1,
         size.height,
       ),
     );
-    canvas.drawPath(
-      fill,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [lineColor.withAlpha(55), lineColor.withAlpha(0)],
-        ).createShader(Offset.zero & size),
-    );
+    // The area is powder density: thick under the line, sparse at the base.
+    final random = math.Random(77);
+    final dot = Paint();
+    for (var i = 0; i < 1100; i++) {
+      final x = left + random.nextDouble() * chartWidth;
+      final fi = (x - left) / (chartWidth / (values.length - 1));
+      final i0 = math.min(values.length - 2, fi.floor());
+      final f = fi - i0;
+      final eased = f * f * (3 - 2 * f);
+      final yLine = yOf(values[i0] + (values[i0 + 1] - values[i0]) * eased);
+      final depth = math.pow(random.nextDouble(), 1.9).toDouble();
+      final y = yLine + 1.5 + depth * (base - yLine);
+      dot.color =
+          (random.nextDouble() < .55 ? MintColors.grainDark : MintColors.powder)
+              .withValues(alpha: (.9 - depth * .6).clamp(0, 1));
+      canvas.drawCircle(Offset(x, y), .45 + random.nextDouble() * .85, dot);
+    }
     canvas.drawPath(
       path,
       Paint()
-        ..color = lineColor
+        ..color = MintColors.deep
         ..strokeWidth = 2.5
         ..style = PaintingStyle.stroke
+        ..strokeJoin = StrokeJoin.round
         ..strokeCap = StrokeCap.round,
     );
     canvas.restore();
 
-    final latest = points.last;
-    final pulseRadius = 8 + 5 * pulseProgress;
-    canvas.drawCircle(
-      latest,
-      pulseRadius,
-      Paint()..color = lineColor.withAlpha(18),
-    );
-    canvas.drawCircle(latest, 4, Paint()..color = AppColors.surface);
-    canvas.drawCircle(
-      latest,
-      4,
+    canvas.drawLine(
+      Offset(left, base),
+      Offset(size.width - right + 6, base),
       Paint()
-        ..color = lineColor
-        ..strokeWidth = 2
-        ..style = PaintingStyle.stroke,
+        ..color = MintColors.ink
+        ..strokeWidth = 1.2,
     );
 
     if (selectedIndex != null) {
-      final index = selectedIndex!.clamp(0, points.length - 1);
-      final point = points[index];
+      final point = points[selectedIndex!.clamp(0, points.length - 1)];
       canvas.drawLine(
         Offset(point.dx, top),
-        Offset(point.dx, size.height - bottom),
+        Offset(point.dx, base),
         Paint()
-          ..color = lineColor.withAlpha(110)
+          ..color = MintColors.ink.withValues(alpha: .45)
           ..strokeWidth = 1,
       );
-      canvas.drawCircle(point, 7, Paint()..color = AppColors.surface);
+      canvas.drawCircle(point, 6, Paint()..color = MintColors.stock);
       canvas.drawCircle(
         point,
-        7,
+        6,
         Paint()
-          ..color = lineColor
+          ..color = MintColors.deep
           ..strokeWidth = 2
           ..style = PaintingStyle.stroke,
       );
@@ -1571,35 +1632,30 @@ class _EnhancedChartPainter extends CustomPainter {
   }
 
   void _dashedLine(Canvas canvas, Offset start, Offset end, Paint paint) {
-    const dash = 5.0;
-    const gap = 5.0;
     var x = start.dx;
     while (x < end.dx) {
       canvas.drawLine(
         Offset(x, start.dy),
-        Offset(math.min(x + dash, end.dx), end.dy),
+        Offset(math.min(x + 2, end.dx), end.dy),
         paint,
       );
-      x += dash + gap;
+      x += 5;
     }
   }
 
-  void _axisLabel(Canvas canvas, String text, Offset offset, double width) {
-    final painter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: const TextStyle(
-          color: AppColors.secondary,
-          fontSize: 9,
-          fontWeight: FontWeight.w500,
+  void _label(Canvas canvas, String text, Offset offset) {
+    TextPainter(
+        text: TextSpan(
+          text: text,
+          style: MintText.mono(size: 10, color: MintColors.mute),
         ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: width);
-    painter.paint(canvas, offset);
+        textDirection: TextDirection.ltr,
+      )
+      ..layout(maxWidth: 44)
+      ..paint(canvas, offset);
   }
 
-  String _axisLabelValue(double value) {
+  String _axisValue(double value) {
     if (value >= 1000) {
       return '${(value / 1000).toStringAsFixed(value >= 10000 ? 0 : 1)}k';
     }
@@ -1609,155 +1665,8 @@ class _EnhancedChartPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _EnhancedChartPainter oldDelegate) =>
       oldDelegate.values != values ||
-      oldDelegate.rateId != rateId ||
       oldDelegate.selectedIndex != selectedIndex ||
-      oldDelegate.drawProgress != drawProgress ||
-      oldDelegate.pulseProgress != pulseProgress;
-}
-
-class RateChart extends StatelessWidget {
-  const RateChart({
-    required this.rate,
-    required this.values,
-    required this.range,
-    required this.onRangeChanged,
-    super.key,
-  });
-
-  final Rate rate;
-  final List<double> values;
-  final String range;
-  final ValueChanged<String> onRangeChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        SizedBox(
-          height: 180,
-          width: double.infinity,
-          child: values.length < 2
-              ? Center(
-                  child: Text(
-                    'Loading price history…',
-                    style: AppTextStyles.caption,
-                    textAlign: TextAlign.center,
-                  ),
-                )
-              : CustomPaint(
-                  painter: _ChartPainter(
-                    values: downsample(values, 120),
-                    isGold: rate.isGold,
-                  ),
-                ),
-        ),
-        const SizedBox(height: 9),
-        Wrap(
-          spacing: 8,
-          children: ['1W', '1M', '3M', '1Y']
-              .map(
-                (item) => ChoiceChip(
-                  label: Text(item),
-                  selected: range == item,
-                  showCheckmark: false,
-                  onSelected: (_) => onRangeChanged(item),
-                  selectedColor: AppColors.teal,
-                  backgroundColor: Colors.transparent,
-                  side: const BorderSide(color: AppColors.divider),
-                  labelStyle: TextStyle(
-                    color: range == item ? Colors.white : AppColors.secondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              )
-              .toList(),
-        ),
-      ],
-    );
-  }
-}
-
-class _ChartPainter extends CustomPainter {
-  _ChartPainter({required this.values, required this.isGold});
-
-  final List<double> values;
-  final bool isGold;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final lineColor = isGold ? AppColors.gold : AppColors.teal;
-    final grid = Paint()
-      ..color = AppColors.divider
-      ..strokeWidth = 1;
-    for (var y = 18.0; y < size.height; y += 38) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
-    }
-    final lo = values.reduce(math.min);
-    final hi = values.reduce(math.max);
-    final points = [
-      for (var i = 0; i < values.length; i++)
-        Offset(
-          size.width * i / (values.length - 1),
-          size.height *
-              (.12 +
-                  .76 * (1 - (hi == lo ? .5 : (values[i] - lo) / (hi - lo)))),
-        ),
-    ];
-    final path = Path()..moveTo(points.first.dx, points.first.dy);
-    for (var index = 1; index < points.length; index++) {
-      final previous = points[index - 1];
-      final current = points[index];
-      final midpoint = (previous.dx + current.dx) / 2;
-      path.cubicTo(
-        midpoint,
-        previous.dy,
-        midpoint,
-        current.dy,
-        current.dx,
-        current.dy,
-      );
-    }
-    final fillPath = Path.from(path)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(
-      fillPath,
-      Paint()
-        ..shader = LinearGradient(
-          colors: [lineColor.withAlpha(40), lineColor.withAlpha(0)],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-        ).createShader(Offset.zero & size),
-    );
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = lineColor
-        ..strokeWidth = 2.5
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round,
-    );
-    final latest = points.last;
-    canvas.drawCircle(latest, 9, Paint()..color = lineColor.withAlpha(30));
-    canvas.drawCircle(latest, 4, Paint()..color = AppColors.surface);
-    canvas.drawCircle(
-      latest,
-      4,
-      Paint()
-        ..color = lineColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ChartPainter oldDelegate) =>
-      oldDelegate.values != values || oldDelegate.isGold != isGold;
+      oldDelegate.drawProgress != drawProgress;
 }
 
 class PurchaseCalculatorSheet extends StatefulWidget {
@@ -1783,17 +1692,19 @@ class _PurchaseCalculatorSheetState extends State<PurchaseCalculatorSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final grams = double.tryParse(_grams.text) ?? 0;
+    final raw = _grams.text.trim();
+    final parsed = double.tryParse(raw);
+    final invalid = raw.isNotEmpty && (parsed == null || parsed < 0);
+    final grams = invalid ? 0.0 : (parsed ?? 0);
     final goldPerTola = widget.gold.amount ?? 0;
     final perGram = goldPerTola / gramsPerTola;
-    final purityFactor = _purity / 24;
-    final metal = perGram * purityFactor * grams;
+    final metal = perGram * (_purity / 24) * grams;
     final estimated = metal * (1 + _makingCharge / 100);
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
         20,
-        8,
+        0,
         20,
         MediaQuery.viewInsetsOf(context).bottom + 24,
       ),
@@ -1802,97 +1713,102 @@ class _PurchaseCalculatorSheetState extends State<PurchaseCalculatorSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Gold purchase calculator', style: AppTextStyles.sectionTitle),
+            const SheetHead(
+              title: 'Weigh a purchase',
+              subtitle: 'The metal’s worth at today’s fixing, with a making-charge allowance.',
+            ),
+            const SizedBox(height: 16),
+            Text('PURITY', style: MintText.label()),
             const SizedBox(height: 6),
-            Text(
-              'Estimate metal value and an optional making-charge allowance.',
-              style: AppTextStyles.subtitle,
+            MintSegmented<int>(
+              options: const [(24, '24K'), (22, '22K'), (18, '18K')],
+              selected: _purity,
+              onChanged: (value) => setState(() => _purity = value),
             ),
             const SizedBox(height: 18),
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(value: 24, label: Text('24K')),
-                ButtonSegment(value: 22, label: Text('22K')),
-                ButtonSegment(value: 18, label: Text('18K')),
-              ],
-              selected: {_purity},
-              onSelectionChanged: (value) =>
-                  setState(() => _purity = value.first),
-              style: ButtonStyle(
-                backgroundColor: WidgetStateProperty.resolveWith(
-                  (states) => states.contains(WidgetState.selected)
-                      ? AppColors.teal
-                      : AppColors.surface,
-                ),
-                foregroundColor: WidgetStateProperty.resolveWith(
-                  (states) => states.contains(WidgetState.selected)
-                      ? Colors.white
-                      : AppColors.secondary,
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
+            Text('WEIGHT', style: MintText.label()),
+            const SizedBox(height: 6),
             TextField(
               controller: _grams,
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
+              style: MintText.mono(size: 20),
               onChanged: (_) => setState(() {}),
-              decoration: const InputDecoration(
-                labelText: 'Quantity',
+              decoration: InputDecoration(
                 suffixText: 'grams',
+                errorText: invalid
+                    ? 'Enter a weight in grams, like 12.5.'
+                    : null,
               ),
             ),
-            const SizedBox(height: 14),
-            Text(
-              'Making charge',
-              style: AppTextStyles.caption.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Text('MAKING CHARGE', style: MintText.label()),
+                const Spacer(),
+                Text(
+                  '${_makingCharge.toStringAsFixed(0)}%',
+                  style: MintText.mono(size: 12, weight: FontWeight.w600),
+                ),
+              ],
             ),
             Slider(
               value: _makingCharge,
               min: 0,
               max: 20,
               divisions: 20,
-              activeColor: AppColors.teal,
               label: '${_makingCharge.toStringAsFixed(0)}%',
               onChanged: (value) => setState(() => _makingCharge = value),
             ),
-            const SizedBox(height: 6),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.mint,
-                borderRadius: BorderRadius.circular(14),
-              ),
+            const SizedBox(height: 4),
+            Slab(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Estimated purchase value',
-                    style: AppTextStyles.caption,
+                    'WORTH AT TODAY’S FIXING',
+                    style: MintText.label(color: MintColors.slabTint)
+                        .copyWith(fontWeight: FontWeight.w600),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    goldPerTola == 0
-                        ? 'Waiting for live price'
-                        : 'Rs ${formatPkr(estimated, decimals: 0)}',
-                    style: AppTextStyles.hero.copyWith(fontSize: 28),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Metal: Rs ${formatPkr(metal, decimals: 0)} · ${_purity}K · ${grams.toStringAsFixed(grams.truncateToDouble() == grams ? 0 : 1)}g',
-                    style: AppTextStyles.caption,
+                  const SizedBox(height: 10),
+                  goldPerTola == 0
+                      ? Text(
+                          'Gold not weighed yet.',
+                          style: MintText.serif(
+                            size: 20,
+                            italic: true,
+                            color: MintColors.stock,
+                          ),
+                        )
+                      : _StruckFigure(
+                          currency: 'PKR',
+                          figure: formatPkr(estimated, decimals: 0),
+                        ),
+                  const _SlabRule(),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _SlabStat(
+                          label: 'Metal',
+                          value: 'Rs ${formatPkr(metal, decimals: 0)}',
+                        ),
+                      ),
+                      _SlabStat(
+                        label: '${_purity}K · weight',
+                        value:
+                            '${grams.toStringAsFixed(grams.truncateToDouble() == grams ? 0 : 1)} g',
+                        end: true,
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 12),
             Text(
-              'Reference estimate only. Confirm purity, making charges and local taxes with the jeweller.',
-              style: AppTextStyles.caption,
+              'A reference estimate only. Confirm purity, making charges and local taxes with the jeweller.',
+              style: MintText.caption(),
             ),
           ],
         ),
@@ -1904,69 +1820,79 @@ class _PurchaseCalculatorSheetState extends State<PurchaseCalculatorSheet> {
 class AlertCard extends StatelessWidget {
   const AlertCard({
     required this.title,
+    required this.isUp,
     required this.progress,
     required this.enabled,
+    required this.triggered,
     required this.isGold,
     required this.onChanged,
     super.key,
   });
 
   final String title;
+  final bool isUp;
   final double progress;
   final bool enabled;
+  final bool triggered;
   final bool isGold;
   final ValueChanged<bool> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: isGold ? AppColors.goldTint : AppColors.mint,
-                shape: BoxShape.circle,
-              ),
-              alignment: Alignment.center,
-              child: Icon(
-                isGold ? Icons.monetization_on_outlined : Icons.attach_money,
-                color: isGold ? AppColors.gold : AppColors.teal,
-              ),
+    return Porcelain(
+      child: Row(
+        children: [
+          _Disk(
+            child: MintIcon(isGold ? MintGlyph.coin : MintGlyph.swap, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: MintText.head(size: 15)),
+                const SizedBox(height: 8),
+                _PowderTrack(progress: progress),
+                const SizedBox(height: 4),
+                Text(
+                  triggered
+                      ? 'Rang once. Resting.'
+                      : '${isUp ? '▲' : '▼'} ${(progress * 100).toStringAsFixed(0)}% of the way',
+                  style: MintText.caption(),
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: AppTextStyles.rowTitle),
-                  const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: progress,
-                      minHeight: 5,
-                      backgroundColor: AppColors.mint,
-                      valueColor: const AlwaysStoppedAnimation(AppColors.teal),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Switch(
-              value: enabled,
-              onChanged: onChanged,
-              activeThumbColor: AppColors.teal,
-              activeTrackColor: AppColors.mint,
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 8),
+          Switch(value: enabled, onChanged: triggered ? null : onChanged),
+        ],
       ),
     );
   }
+}
+
+/// A progress track: a sunken well filled with powder.
+class _PowderTrack extends StatelessWidget {
+  const _PowderTrack({required this.progress});
+
+  final double progress;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: 9,
+    child: Well(
+      radius: 5,
+      padding: EdgeInsets.zero,
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FractionallySizedBox(
+          widthFactor: progress.clamp(0.0, 1.0),
+          heightFactor: 1,
+          child: const Powder(radius: 5, child: SizedBox.expand()),
+        ),
+      ),
+    ),
+  );
 }
 
 class AlertFormSheet extends StatefulWidget {
@@ -1982,6 +1908,7 @@ class AlertFormSheet extends StatefulWidget {
 class _AlertFormSheetState extends State<AlertFormSheet> {
   bool _above = true;
   String _rateId = 'gold';
+  bool _showError = false;
   final _targetController = TextEditingController();
 
   @override
@@ -1990,40 +1917,55 @@ class _AlertFormSheetState extends State<AlertFormSheet> {
     super.dispose();
   }
 
+  double? get _target {
+    final value = double.tryParse(
+      _targetController.text.replaceAll(',', '').trim(),
+    );
+    return value == null || value <= 0 ? null : value;
+  }
+
+  void _save() {
+    final target = _target;
+    if (target == null) {
+      setState(() => _showError = true);
+      return;
+    }
+    Navigator.pop(context);
+    widget.onSave(
+      PriceAlert(
+        id: DateTime.now().microsecondsSinceEpoch.toString(),
+        rateId: _rateId,
+        above: _above,
+        target: target,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        24,
-        8,
-        24,
-        MediaQuery.viewInsetsOf(context).bottom + 28,
+        20,
+        0,
+        20,
+        MediaQuery.viewInsetsOf(context).bottom + 24,
       ),
       child: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Container(
-                width: 38,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppColors.divider,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              ),
+            const SheetHead(
+              title: 'Set an alert',
+              subtitle: 'It rings once when the rate reaches your figure.',
             ),
-            const SizedBox(height: 22),
-            Text('Create alert', style: AppTextStyles.sectionTitle),
+            const SizedBox(height: 18),
+            Text('RATE', style: MintText.label()),
             const SizedBox(height: 6),
-            Text(
-              'Get notified when a rate reaches your target.',
-              style: AppTextStyles.subtitle,
-            ),
-            const SizedBox(height: 22),
             DropdownButtonFormField<String>(
               initialValue: _rateId,
-              decoration: const InputDecoration(labelText: 'Rate'),
+              style: MintText.serif(size: 15),
+              dropdownColor: MintColors.stock,
+              borderRadius: BorderRadius.circular(12),
               items: widget.rates
                   .map(
                     (rate) => DropdownMenuItem(
@@ -2035,63 +1977,33 @@ class _AlertFormSheetState extends State<AlertFormSheet> {
               onChanged: (value) => setState(() => _rateId = value ?? 'gold'),
             ),
             const SizedBox(height: 16),
-            SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(value: true, label: Text('Goes above')),
-                ButtonSegment(value: false, label: Text('Goes below')),
-              ],
-              selected: {_above},
-              onSelectionChanged: (value) =>
-                  setState(() => _above = value.first),
-              style: ButtonStyle(
-                backgroundColor: WidgetStateProperty.resolveWith(
-                  (states) => states.contains(WidgetState.selected)
-                      ? AppColors.teal
-                      : AppColors.surface,
-                ),
-                foregroundColor: WidgetStateProperty.resolveWith(
-                  (states) => states.contains(WidgetState.selected)
-                      ? Colors.white
-                      : AppColors.secondary,
-                ),
-              ),
+            MintSegmented<bool>(
+              options: const [(true, '▲ Goes above'), (false, '▼ Goes below')],
+              selected: _above,
+              onChanged: (value) => setState(() => _above = value),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 18),
+            Text('TARGET PRICE', style: MintText.label()),
+            const SizedBox(height: 6),
             TextField(
               controller: _targetController,
-              keyboardType: TextInputType.number,
-              style: AppTextStyles.hero.copyWith(fontSize: 30),
-              decoration: const InputDecoration(
-                labelText: 'Target price',
-                prefixText: 'Rs ',
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
               ),
-            ),
-            const SizedBox(height: 20),
-            FilledButton(
-              onPressed: () {
-                final target = double.tryParse(
-                  _targetController.text.replaceAll(',', '').trim(),
-                );
-                if (target == null || target <= 0) return;
-                widget.onSave(
-                  PriceAlert(
-                    id: DateTime.now().microsecondsSinceEpoch.toString(),
-                    rateId: _rateId,
-                    above: _above,
-                    target: target,
-                  ),
-                );
-                Navigator.pop(context);
+              style: MintText.mono(size: 20),
+              onChanged: (_) {
+                if (_showError) setState(() => _showError = false);
               },
-              style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(52),
-                backgroundColor: AppColors.teal,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
+              onSubmitted: (_) => _save(),
+              decoration: InputDecoration(
+                prefixText: 'Rs ',
+                errorText: _showError
+                    ? 'Enter a figure above zero, like 285000.'
+                    : null,
               ),
-              child: const Text('Save alert'),
             ),
+            const SizedBox(height: 4),
+            MintButton(label: 'Keep this alert', onPressed: _save),
           ],
         ),
       ),
