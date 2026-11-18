@@ -1,4 +1,4 @@
 # MINT
 
-A  Flutter project.
+Gold and Currency tracker mobile app.
 
