@@ -929,13 +929,13 @@ class MintWordmark extends StatelessWidget {
         children: [
           Image.asset(
             'assets/mint_logo.png',
-            width: size * .78,
-            height: size * .78,
+            width: 34,
+            height: 34,
           ),
-          SizedBox(width: size * .08),
+          const SizedBox(width: 6),
           Text(
             'MINT',
-            style: MintText.logo(size: size * .48, color: MintColors.deep),
+            style: MintText.logo(size: 17, color: MintColors.deep),
             semanticsLabel: 'MINT',
           ),
         ],
