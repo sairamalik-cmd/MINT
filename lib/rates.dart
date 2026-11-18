@@ -19,6 +19,7 @@ const supportedCurrencyCodes = [
   'USD',
   'SAR',
   'AED',
+  'CNY',
   'EUR',
   'GBP',
   'KRW',
@@ -35,12 +36,21 @@ class RateConfig {
   static const fxFallbackUrl =
       'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json';
 
+  /// Past gold prices (daily candles, USD per troy ounce).
+  static const goldHistoryUrl = 'https://xaus.com/api/v1/history';
+
+  /// Past USD rates; {date} becomes YYYY-MM-DD.
+  static const fxHistoryUrl =
+      'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{date}/v1/currencies/usd.json';
+
   static const goldRefresh = Duration(seconds: 60);
   static const fxRefresh = Duration(hours: 6);
   static const goldStaleAfter = Duration(hours: 1);
   static const fxStaleAfter = Duration(hours: 30);
   static const historyInterval = Duration(minutes: 15);
   static const manualCooldown = Duration(seconds: 10);
+  static const backfillEvery = Duration(hours: 12);
+  static const historyKeepDays = 400;
   static const requestTimeout = Duration(seconds: 10);
 
   /// Percent added to the international gold price to approximate the local
@@ -119,6 +129,16 @@ const placeholderRates = [
     name: 'UAE Dirham',
     value: 'Rs —',
     unit: '/ 1 AED',
+    change: '—',
+    isUp: true,
+    isGold: false,
+  ),
+  Rate(
+    id: 'cny',
+    code: 'CNY',
+    name: 'Chinese Yuan',
+    value: 'Rs —',
+    unit: '/ 1 CNY',
     change: '—',
     isUp: true,
     isGold: false,
@@ -336,7 +356,7 @@ class RateService {
     return null;
   }
 
-  /// USD to PKR. Tries the primary feed, then the fallback.
+  /// USD-based currency rates. Tries the primary feed, then the fallback.
   Future<Map<String, double>> fetchUsdRates() async {
     try {
       return await _getFxPrimary();
@@ -358,9 +378,7 @@ class RateService {
     final parsed = <String, double>{};
     for (final entry in rates.entries) {
       final value = _asDouble(entry.value);
-      if (value != null && _isValid(value)) {
-        parsed[entry.key.toString().toUpperCase()] = value;
-      }
+      if (_isValid(value)) parsed[entry.key.toString().toUpperCase()] = value!;
     }
     if (!_isValid(parsed['PKR'])) {
       throw const RateException('PKR missing in response');
@@ -381,12 +399,73 @@ class RateService {
     final parsed = <String, double>{};
     for (final entry in usd.entries) {
       final value = _asDouble(entry.value);
-      if (value != null && _isValid(value)) {
-        parsed[entry.key.toString().toUpperCase()] = value;
-      }
+      if (_isValid(value)) parsed[entry.key.toString().toUpperCase()] = value!;
     }
     if (!_isValid(parsed['PKR'])) {
       throw const RateException('PKR missing in response');
+    }
+    return parsed;
+  }
+
+  /// Daily gold closes in USD per troy ounce (up to 5 years), oldest first.
+  Future<List<RatePoint>> fetchGoldHistoryUsd() async {
+    final response = await _client
+        .get(Uri.parse(RateConfig.goldHistoryUrl))
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw RateException('Gold history returned ${response.statusCode}');
+    }
+    final json = jsonDecode(response.body);
+    final raw = json is Map ? json['points'] : null;
+    if (raw is! List) throw const RateException('Gold history missing');
+    final out = <RatePoint>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final date = DateTime.tryParse('${item['d'] ?? item['date'] ?? ''}');
+      final close = _asDouble(item['c'] ?? item['close']);
+      if (date == null || close == null || !_isValid(close)) continue;
+      if (close < 100 || close > 100000) continue;
+      out.add(RatePoint(date, close));
+    }
+    out.sort((a, b) => a.time.compareTo(b.time));
+    return out;
+  }
+
+  /// USD to PKR on a past day, or null if that day isn't available.
+  Future<double?> fetchUsdPkrOn(DateTime date) async {
+    final stamp =
+        '${date.year}-'
+        '${date.month.toString().padLeft(2, '0')}-'
+        '${date.day.toString().padLeft(2, '0')}';
+    final url = RateConfig.fxHistoryUrl.replaceAll('{date}', stamp);
+    final response = await _client
+        .get(Uri.parse(url))
+        .timeout(RateConfig.requestTimeout);
+    if (response.statusCode != 200) return null;
+    final json = jsonDecode(response.body);
+    final usd = json is Map ? json['usd'] : null;
+    final pkr = usd is Map ? _asDouble(usd['pkr']) : null;
+    return _isValid(pkr) ? pkr : null;
+  }
+
+  /// Full USD-based currency map for a past day.
+  Future<Map<String, double>?> fetchUsdRatesOn(DateTime date) async {
+    final stamp =
+        '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+    final url = RateConfig.fxHistoryUrl.replaceAll('{date}', stamp);
+    final response = await _client
+        .get(Uri.parse(url))
+        .timeout(RateConfig.requestTimeout);
+    if (response.statusCode != 200) return null;
+    final json = jsonDecode(response.body);
+    final usd = json is Map ? json['usd'] : null;
+    if (usd is! Map) return null;
+    final parsed = <String, double>{};
+    for (final entry in usd.entries) {
+      final value = _asDouble(entry.value);
+      if (_isValid(value)) {
+        parsed[entry.key.toString().toUpperCase()] = value!;
+      }
     }
     return parsed;
   }
@@ -410,11 +489,14 @@ class RateController extends ChangeNotifier {
 
   static const _snapshotKey = 'mint.snapshot.v1';
   static const _historyKey = 'mint.history.v1';
+  static const _backfillKey = 'mint.currency-backfill.v2';
 
   final RateService _service;
 
   MarketSnapshot? snapshot;
   Map<String, List<RatePoint>> history = {};
+  DateTime? _backfilledAt;
+  bool _backfilling = false;
   bool isRefreshing = false;
   String? error;
 
@@ -436,6 +518,8 @@ class RateController extends ChangeNotifier {
     _timer = Timer.periodic(RateConfig.goldRefresh, (_) {
       if (_foreground) refresh();
     });
+    // Fill the charts with real past prices in the background.
+    unawaited(_backfill());
   }
 
   void setForeground(bool value) {
@@ -536,7 +620,7 @@ class RateController extends ChangeNotifier {
     _append('gold', s.gold24kPkrPerTola, time);
     _append('usd', s.usdPkr, time);
     _append('sar', s.sarPkr, time);
-    for (final code in supportedCurrencyCodes.skip(1)) {
+    for (final code in supportedCurrencyCodes.skip(2)) {
       final value = s.pkrPerCurrency(code);
       if (value > 0) {
         _append(code.toLowerCase(), code == 'KRW' ? value * 1000 : value, time);
@@ -557,9 +641,13 @@ class RateController extends ChangeNotifier {
   /// Keeps every point from the last 7 days, and one point per day before that.
   List<RatePoint> _compact(List<RatePoint> points, DateTime now) {
     final cutoff = now.subtract(const Duration(days: 7));
+    final oldest = now.subtract(
+      const Duration(days: RateConfig.historyKeepDays),
+    );
     final recent = <RatePoint>[];
     final daily = <String, RatePoint>{};
     for (final point in points) {
+      if (point.time.isBefore(oldest)) continue;
       if (point.time.isAfter(cutoff)) {
         recent.add(point);
       } else {
@@ -573,13 +661,31 @@ class RateController extends ChangeNotifier {
   }
 
   /// Values for the chart, oldest first, within the selected range.
+  ///
+  /// Sampled on an even time grid (carrying the last known value forward), so
+  /// the chart is true to time even when recent points are dense and old ones
+  /// are daily.
   List<double> chartValues(String id, String range) {
     const days = {'1W': 7, '1M': 30, '3M': 90, '1Y': 365};
-    final cutoff = DateTime.now().subtract(Duration(days: days[range] ?? 7));
-    return [
-      for (final point in history[id] ?? const <RatePoint>[])
-        if (point.time.isAfter(cutoff)) point.value,
-    ];
+    final points = history[id] ?? const <RatePoint>[];
+    if (points.isEmpty) return const [];
+    final span = Duration(days: days[range] ?? 7);
+    final start = DateTime.now().subtract(span);
+    const steps = 60;
+    final values = <double>[];
+    var next = 0;
+    double? current;
+    for (var step = 0; step <= steps; step++) {
+      final time = start.add(
+        Duration(milliseconds: span.inMilliseconds * step ~/ steps),
+      );
+      while (next < points.length && !points[next].time.isAfter(time)) {
+        current = points[next].value;
+        next++;
+      }
+      if (current != null) values.add(current);
+    }
+    return values;
   }
 
   /// Last recorded value of each day, oldest first.
@@ -621,6 +727,10 @@ class RateController extends ChangeNotifier {
           ),
         );
       }
+      final backfilled = prefs.getInt(_backfillKey);
+      if (backfilled != null) {
+        _backfilledAt = DateTime.fromMillisecondsSinceEpoch(backfilled);
+      }
     } catch (_) {
       // Corrupt or missing cache: start fresh.
     }
@@ -646,6 +756,187 @@ class RateController extends ChangeNotifier {
       // Saving is best-effort.
     }
   }
+
+  // ----- history backfill ----------------------------------------------------
+
+  /// Fills the charts with real past prices so they don't start empty.
+  /// Runs in the background; failures are silent and retried next launch.
+  Future<void> _backfill() async {
+    if (_backfilling || _disposed) return;
+    final now = DateTime.now();
+    final last = _backfilledAt;
+    if (last != null && now.difference(last) < RateConfig.backfillEvery) {
+      return;
+    }
+    _backfilling = true;
+    try {
+      final fxSamples = await _fetchFxSamples(_sampleDates(now));
+      var goldUsd = const <RatePoint>[];
+      try {
+        goldUsd = await _service.fetchGoldHistoryUsd();
+      } catch (_) {
+        // Gold history unavailable: the charts still fill in over time.
+      }
+      if (_disposed) return;
+      if (fxSamples.isEmpty && goldUsd.isEmpty) return;
+
+      final fxDays = fxSamples.keys.toList()..sort();
+      _mergeBackfill('usd', [
+        for (final day in fxDays)
+          if ((fxSamples[day]?['PKR'] ?? 0) > 0)
+            RatePoint(_endOfDay(day), fxSamples[day]!['PKR']!),
+      ]);
+      for (final code in supportedCurrencyCodes.skip(1)) {
+        final id = code.toLowerCase();
+        final points = <RatePoint>[];
+        for (final day in fxDays) {
+          final sample = fxSamples[day];
+          final pkr = sample?['PKR'];
+          if (pkr == null || pkr <= 0) continue;
+          double? value;
+          if (code == 'SAR') {
+            value = pkr / sarPerUsd;
+          } else {
+            final usdPerUnit = sample?[code];
+            if (usdPerUnit != null && usdPerUnit > 0) {
+              value = pkr / usdPerUnit;
+            }
+          }
+          if (value != null && value > 0) {
+            points.add(
+              RatePoint(_endOfDay(day), code == 'KRW' ? value * 1000 : value),
+            );
+          }
+        }
+        _mergeBackfill(id, points);
+      }
+
+      // Gold in PKR = past USD price x the USD/PKR rate of that time.
+      final fallbackFx = snapshot?.usdPkr;
+      final oldest = now.subtract(
+        const Duration(days: RateConfig.historyKeepDays),
+      );
+      final goldPoints = <RatePoint>[];
+      for (final candle in goldUsd) {
+        if (candle.time.isBefore(oldest)) continue;
+        final day = DateTime(
+          candle.time.year,
+          candle.time.month,
+          candle.time.day,
+        );
+        final fx = _fxOn(day, fxDays, fxSamples)?['PKR'] ?? fallbackFx;
+        if (fx == null) continue;
+        goldPoints.add(
+          RatePoint(
+            _endOfDay(day),
+            candle.value /
+                gramsPerTroyOz *
+                fx *
+                (1 + RateConfig.goldPremiumPercent / 100) *
+                gramsPerTola,
+          ),
+        );
+      }
+      _mergeBackfill('gold', goldPoints);
+
+      _backfilledAt = DateTime.now();
+      await _save();
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt(_backfillKey, _backfilledAt!.millisecondsSinceEpoch);
+      } catch (_) {
+        // Best-effort.
+      }
+    } finally {
+      _backfilling = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  /// Days to sample the USD rate on: daily for 2 weeks, then weekly for a year.
+  List<DateTime> _sampleDates(DateTime now) {
+    final dates = <DateTime>[];
+    for (var back = 1; back <= 14; back++) {
+      dates.add(DateTime(now.year, now.month, now.day - back));
+    }
+    for (var back = 21; back <= 364; back += 7) {
+      dates.add(DateTime(now.year, now.month, now.day - back));
+    }
+    return dates
+        .where(
+          (day) =>
+              !_hasDay('usd', day) ||
+              supportedCurrencyCodes.any(
+                (code) => !_hasDay(code.toLowerCase(), day),
+              ),
+        )
+        .toList();
+  }
+
+  Future<Map<DateTime, Map<String, double>>> _fetchFxSamples(
+    List<DateTime> dates,
+  ) async {
+    final result = <DateTime, Map<String, double>>{};
+    var index = 0;
+    Future<void> worker() async {
+      while (!_disposed && index < dates.length) {
+        final date = dates[index++];
+        try {
+          final value = await _service.fetchUsdRatesOn(date);
+          if (value != null && value['PKR'] != null) {
+            result[date] = value;
+          }
+        } catch (_) {
+          // Skip days that can't be fetched.
+        }
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < 6; i++) worker()]);
+    return result;
+  }
+
+  /// The sampled USD rate on or just before [day] (else the nearest after).
+  Map<String, double>? _fxOn(
+    DateTime day,
+    List<DateTime> sortedDays,
+    Map<DateTime, Map<String, double>> samples,
+  ) {
+    DateTime? pick;
+    for (final sample in sortedDays) {
+      if (sample.isAfter(day)) {
+        pick ??= sample;
+        break;
+      }
+      pick = sample;
+    }
+    return pick == null ? null : samples[pick];
+  }
+
+  /// Adds past points without overwriting days the app recorded itself.
+  void _mergeBackfill(String id, List<RatePoint> points) {
+    if (points.isEmpty) return;
+    final existing = history[id] ?? const <RatePoint>[];
+    final taken = {for (final p in existing) _dayKey(p.time)};
+    final today = _dayKey(DateTime.now());
+    final merged = [
+      ...existing,
+      for (final p in points)
+        if (!taken.contains(_dayKey(p.time)) && _dayKey(p.time) != today) p,
+    ]..sort((a, b) => a.time.compareTo(b.time));
+    history[id] = _compact(merged, DateTime.now());
+  }
+
+  bool _hasDay(String id, DateTime day) {
+    final key = _dayKey(day);
+    return (history[id] ?? const <RatePoint>[]).any(
+      (p) => _dayKey(p.time) == key,
+    );
+  }
+
+  String _dayKey(DateTime t) => '${t.year}-${t.month}-${t.day}';
+
+  DateTime _endOfDay(DateTime d) => DateTime(d.year, d.month, d.day, 23, 59);
 
   @override
   void dispose() {
@@ -728,6 +1019,7 @@ List<Rate> buildRates({
     ...[
       ('sar', 'SR', 'Saudi Riyal', 'SAR', 2, '/ 1 SAR'),
       ('aed', 'AED', 'UAE Dirham', 'AED', 2, '/ 1 AED'),
+      ('cny', 'CNY', 'Chinese Yuan', 'CNY', 2, '/ 1 CNY'),
       ('eur', '€', 'Euro', 'EUR', 2, '/ 1 EUR'),
       ('gbp', '£', 'British Pound', 'GBP', 2, '/ 1 GBP'),
       ('krw', '₩', 'South Korean Won', 'KRW', 4, '/ 1,000 KRW'),
