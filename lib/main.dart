@@ -927,11 +927,7 @@ class MintWordmark extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Image.asset(
-            'assets/mint_logo.png',
-            width: 34,
-            height: 34,
-          ),
+          Image.asset('assets/mint_logo.png', width: 34, height: 34),
           const SizedBox(width: 6),
           Text(
             'MINT',
