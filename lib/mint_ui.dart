@@ -312,7 +312,7 @@ const goldEdge = LinearGradient(
 );
 
 /// A set of choices in a well; the chosen one is raised porcelain with a gold
-/// edge (`.seg`). `mini` is the small mono variant used for ranges.
+/// edge (`.seg`). `mini` is the small variant used for ranges.
 class MintSegmented<T> extends StatelessWidget {
   const MintSegmented({
     required this.options,
@@ -372,18 +372,16 @@ class _SegItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final radius = mini ? 7.0 : 9.0;
+    // Range chips are chart controls (DM Sans); full-size options are
+    // buttons (DM Sans Medium).
+    final color = selected ? MintColors.ink : MintColors.mute;
     final style = mini
         ? MintText.mono(
             size: 11,
             weight: selected ? FontWeight.w600 : FontWeight.w500,
-            color: selected ? MintColors.ink : MintColors.mute,
+            color: color,
           )
-        : MintText.serif(
-            size: 15,
-            weight: selected ? FontWeight.w600 : FontWeight.w400,
-            color: selected ? MintColors.ink : MintColors.mute,
-            height: 1.2,
-          );
+        : MintText.button(size: 14, color: color).copyWith(height: 1.2);
     return Semantics(
       button: true,
       selected: selected,
@@ -428,6 +426,7 @@ class _SegItem extends StatelessWidget {
 }
 
 /// A ruled section head: "01 WATCHING ........ the pairs on your counter".
+/// The number and name are DM Sans Semibold; the aside is DM Sans italic.
 class SectionRule extends StatelessWidget {
   const SectionRule({
     required this.number,
@@ -475,11 +474,8 @@ class SectionRule extends StatelessWidget {
                 aside!,
                 textAlign: TextAlign.right,
                 overflow: TextOverflow.ellipsis,
-                style: MintText.serif(
-                  size: 13,
-                  italic: true,
-                  color: MintColors.mute,
-                ),
+                style: MintText.body(color: MintColors.mute)
+                    .copyWith(fontSize: 12.5, fontStyle: FontStyle.italic),
               ),
             ),
         ],
@@ -519,7 +515,7 @@ class MoveText extends StatelessWidget {
 }
 
 /// The pill button: porcelain rim around a powder face that tamps flat when
-/// pressed and whisks while it works (`.btn`).
+/// pressed and whisks while it works (`.btn`). Label is DM Sans Medium.
 class MintButton extends StatefulWidget {
   const MintButton({
     required this.label,
@@ -547,12 +543,10 @@ class _MintButtonState extends State<MintButton> {
           ? const Whisk(size: 22, color: MintColors.ink)
           : Text(
               widget.label,
-              style: MintText.serif(
-                size: 18,
-                weight: disabled ? FontWeight.w500 : FontWeight.w600,
+              style: MintText.button(
+                size: 16,
                 color: disabled ? const Color(0xFF8C9993) : MintColors.ink,
-                height: 1,
-              ),
+              ).copyWith(height: 1),
             ),
     );
     return Semantics(
@@ -886,6 +880,7 @@ class _GlyphPainter extends CustomPainter {
 }
 
 /// The tab bar: the chosen tab's disk is ringed in gold (`.tabbar`).
+/// Tab labels are DM Sans Medium.
 class MintTabBar extends StatelessWidget {
   const MintTabBar({
     required this.items,
@@ -967,9 +962,7 @@ class MintTabBar extends StatelessWidget {
                                     : MintColors.mute,
                               ).copyWith(
                                 letterSpacing: .6,
-                                fontWeight: i == index
-                                    ? FontWeight.w600
-                                    : FontWeight.w500,
+                                fontWeight: FontWeight.w500,
                               ),
                         ),
                       ],
@@ -1013,13 +1006,7 @@ void showMintToast(BuildContext context, String word, String detail) {
               children: [
                 Text(
                   word,
-                  style: MintText.serif(
-                    size: 16,
-                    weight: FontWeight.w600,
-                    italic: true,
-                    color: MintColors.stock,
-                    height: 1.2,
-                  ),
+                  style: MintText.head(size: 15, color: MintColors.stock),
                 ),
                 Text(
                   detail,
@@ -1130,7 +1117,7 @@ class _HatchPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-/// The small porcelain pill (`.mbtn`).
+/// The small porcelain pill (`.mbtn`). Label is DM Sans Medium.
 class _SmallPill extends StatelessWidget {
   const _SmallPill({required this.label, required this.onTap});
 
@@ -1147,7 +1134,10 @@ class _SmallPill extends StatelessWidget {
       decoration: porcelainDecoration(radius: 20),
       child: Text(
         label,
-        style: MintText.serif(size: 14.5, weight: FontWeight.w600, height: 1),
+        style: MintText.button(
+          size: 14,
+          color: MintColors.ink,
+        ).copyWith(height: 1),
       ),
     ),
   );
@@ -1172,11 +1162,7 @@ class MintLink extends StatelessWidget {
           children: [
             Text(
               label,
-              style: MintText.serif(
-                size: 14.5,
-                weight: FontWeight.w600,
-                color: MintColors.deep,
-              ),
+              style: MintText.button(size: 14, color: MintColors.deep),
             ),
             const SizedBox(width: 6),
             Text('→', style: MintText.mono(size: 14, color: MintColors.deep)),

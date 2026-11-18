@@ -362,9 +362,10 @@ class _DashboardPageState extends State<DashboardPage>
         const SizedBox(height: 16),
         Text(dateLine(now).toUpperCase(), style: MintText.label()),
         const SizedBox(height: 6),
+        // Greeting: DM Serif Display.
         Text(
           '${greeting(now)}.',
-          style: MintText.serif(size: 24, italic: true, height: 1.15),
+          style: MintText.serif(size: 26, height: 1.15),
         ),
         const SizedBox(height: 2),
         Text(
@@ -534,10 +535,7 @@ class _DashboardPageState extends State<DashboardPage>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Nothing set to ring.',
-                  style: MintText.serif(size: 16, italic: true),
-                ),
+                Text('Nothing set to ring.', style: MintText.head(size: 16)),
                 const SizedBox(height: 2),
                 Text(
                   'Set a figure and it is weighed with every refresh.',
@@ -757,6 +755,9 @@ class _DashboardPageState extends State<DashboardPage>
                 children: [
                   Row(
                     children: [
+                      // Legend dot: the same color as this pair's chart line.
+                      CurrencyDot(id: rate.id),
+                      const SizedBox(width: 8),
                       Flexible(
                         child: Text(
                           rate.name,
@@ -774,12 +775,15 @@ class _DashboardPageState extends State<DashboardPage>
                       ),
                     ],
                   ),
-                  Text(
-                    rate.updatedAt == null
-                        ? 'not weighed yet'
-                        : '${rate.unit.replaceFirst('/ ', 'per ')} · ${timeAgo(rate.updatedAt!, now)}${rate.isStale ? ' · stale' : ''}',
-                    style: MintText.caption(
-                      color: rate.isStale ? MintColors.hoji : MintColors.mute,
+                  Padding(
+                    padding: const EdgeInsets.only(left: 16),
+                    child: Text(
+                      rate.updatedAt == null
+                          ? 'not weighed yet'
+                          : '${rate.unit.replaceFirst('/ ', 'per ')} · ${timeAgo(rate.updatedAt!, now)}${rate.isStale ? ' · stale' : ''}',
+                      style: MintText.caption(
+                        color: rate.isStale ? MintColors.hoji : MintColors.mute,
+                      ),
                     ),
                   ),
                 ],
@@ -815,6 +819,25 @@ class _DashboardPageState extends State<DashboardPage>
     }
     return rows;
   }
+}
+
+/// A small dot in a currency's own chart color, used as a legend marker.
+class CurrencyDot extends StatelessWidget {
+  const CurrencyDot({required this.id, this.size = 8, super.key});
+
+  /// A rate id ('gold', 'usd', 'sar', ...) or a currency code.
+  final String id;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      color: MintColors.currencyGraph(id),
+      shape: BoxShape.circle,
+    ),
+  );
 }
 
 /// The head of every screen: the wordmark (or the screen's title), when it
@@ -862,7 +885,7 @@ class _ScreenHead extends StatelessWidget {
               ),
               textAlign: TextAlign.right,
               style: MintText.label(color: MintColors.ink)
-                  .copyWith(fontWeight: FontWeight.w600, height: 1.4),
+                  .copyWith(height: 1.4),
             ),
           ),
           const SizedBox(width: 10),
@@ -890,7 +913,7 @@ class _ScreenHead extends StatelessWidget {
   }
 }
 
-/// "Mint" in Fraunces italic, poured from spearmint into matcha.
+/// "Mint" in DM Serif Display Italic, poured from spearmint into matcha.
 class MintWordmark extends StatelessWidget {
   const MintWordmark({this.size = 54, super.key});
 
@@ -915,7 +938,7 @@ class MintWordmark extends StatelessWidget {
           padding: const EdgeInsets.only(right: 6, bottom: 4),
           child: Text(
             'Mint',
-            style: MintText.display(size: size, color: Colors.white),
+            style: MintText.logo(size: size, color: Colors.white),
             semanticsLabel: 'MINT',
           ),
         ),
@@ -924,7 +947,7 @@ class MintWordmark extends StatelessWidget {
   }
 }
 
-/// A figure struck on the slab: small mono currency, big Fraunces number.
+/// A figure struck on the slab: small currency label, big DM Serif number.
 class _StruckFigure extends StatelessWidget {
   const _StruckFigure({required this.currency, required this.figure});
 
@@ -1042,8 +1065,8 @@ class _Star extends StatelessWidget {
   );
 }
 
-/// A ledger table: mono heads over an ink rule, glaze hairlines between rows.
-/// The highlighted row carries a powder band and a gold edge (`table.rates`).
+/// A ledger table: small uppercase heads over an ink rule, glaze hairlines
+/// between rows. The highlighted row carries a powder band and a gold edge.
 class _MintTable extends StatelessWidget {
   const _MintTable({required this.headings, required this.rows});
 
@@ -1071,8 +1094,7 @@ class _MintTable extends StatelessWidget {
                   child: Text(
                     headings[i].toUpperCase(),
                     textAlign: i == 0 ? TextAlign.left : TextAlign.right,
-                    style: MintText.label(size: 10)
-                        .copyWith(fontWeight: FontWeight.w600),
+                    style: MintText.label(size: 10),
                   ),
                 ),
             ],
@@ -1276,6 +1298,8 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
     final values = downsample(widget.values, 120);
     final hasData = values.length >= 2;
     final change = hasData ? (values.last / values.first - 1) * 100 : null;
+    // Each currency draws in its own color.
+    final color = MintColors.currencyGraph(widget.rate.id);
     return Porcelain(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1283,10 +1307,18 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
           Row(
             children: [
               Expanded(
-                child: Text(
-                  '${widget.rate.name.toUpperCase()} · ${widget.range}',
-                  style: MintText.label(),
-                  overflow: TextOverflow.ellipsis,
+                child: Row(
+                  children: [
+                    CurrencyDot(id: widget.rate.id),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        '${widget.rate.name.toUpperCase()} · ${widget.range}',
+                        style: MintText.label(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               MintSegmented<String>(
@@ -1340,6 +1372,7 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
                                 size: Size(width, 180),
                                 painter: _EnhancedChartPainter(
                                   values: values,
+                                  color: color,
                                   selectedIndex: _selectedIndex,
                                   drawProgress: _drawAnimation.value,
                                 ),
@@ -1350,6 +1383,7 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
                                 size: Size(width, 180),
                                 painter: _PulsePainter(
                                   values: values,
+                                  color: color,
                                   pulse: _pulseController,
                                 ),
                               ),
@@ -1445,14 +1479,17 @@ class _EnhancedRateChartState extends State<EnhancedRateChart>
   }
 }
 
-/// The chart: a deep line over powder that lies thinner toward the base, the
-/// latest figure ringed in gold, values on the right in mono.
-/// The latest figure, ringed in gold and breathing. Repaints on its own.
+/// The latest figure, ringed in the currency's color and breathing.
+/// Repaints on its own.
 class _PulsePainter extends CustomPainter {
-  _PulsePainter({required this.values, required this.pulse})
-    : super(repaint: pulse);
+  _PulsePainter({
+    required this.values,
+    required this.color,
+    required this.pulse,
+  }) : super(repaint: pulse);
 
   final List<double> values;
+  final Color color;
   final Animation<double> pulse;
 
   @override
@@ -1466,26 +1503,30 @@ class _PulsePainter extends CustomPainter {
     canvas.drawCircle(
       latest,
       7 + 5 * t,
-      Paint()..color = MintColors.gold.withValues(alpha: .28 * (1 - t)),
+      Paint()..color = color.withValues(alpha: .28 * (1 - t)),
     );
     canvas.drawCircle(latest, 5.5, Paint()..color = MintColors.stock);
     canvas.drawCircle(
       latest,
       5.5,
       Paint()
-        ..color = MintColors.gold
+        ..color = color
         ..strokeWidth = 2.5
         ..style = PaintingStyle.stroke,
     );
   }
 
   @override
-  bool shouldRepaint(covariant _PulsePainter old) => old.values != values;
+  bool shouldRepaint(covariant _PulsePainter old) =>
+      old.values != values || old.color != color;
 }
 
+/// The chart: a line in the currency's color over powder that lies thinner
+/// toward the base, the latest figure ringed, values on the right.
 class _EnhancedChartPainter extends CustomPainter {
   _EnhancedChartPainter({
     required this.values,
+    required this.color,
     required this.selectedIndex,
     required this.drawProgress,
   });
@@ -1496,6 +1537,7 @@ class _EnhancedChartPainter extends CustomPainter {
   static const bottom = 20.0;
 
   final List<double> values;
+  final Color color;
   final int? selectedIndex;
   final double drawProgress;
 
@@ -1575,6 +1617,9 @@ class _EnhancedChartPainter extends CustomPainter {
       ),
     );
     // The area is powder density: thick under the line, sparse at the base.
+    // Both grain tones are shades of the currency's own color.
+    final darkGrain = Color.lerp(color, Colors.black, .18)!;
+    final lightGrain = Color.lerp(color, Colors.white, .4)!;
     final random = math.Random(77);
     final dot = Paint();
     for (var i = 0; i < 1100; i++) {
@@ -1586,15 +1631,14 @@ class _EnhancedChartPainter extends CustomPainter {
       final yLine = yOf(values[i0] + (values[i0 + 1] - values[i0]) * eased);
       final depth = math.pow(random.nextDouble(), 1.9).toDouble();
       final y = yLine + 1.5 + depth * (base - yLine);
-      dot.color =
-          (random.nextDouble() < .55 ? MintColors.grainDark : MintColors.powder)
-              .withValues(alpha: (.9 - depth * .6).clamp(0, 1));
+      dot.color = (random.nextDouble() < .55 ? darkGrain : lightGrain)
+          .withValues(alpha: (.9 - depth * .6).clamp(0, 1));
       canvas.drawCircle(Offset(x, y), .45 + random.nextDouble() * .85, dot);
     }
     canvas.drawPath(
       path,
       Paint()
-        ..color = MintColors.deep
+        ..color = color
         ..strokeWidth = 2.5
         ..style = PaintingStyle.stroke
         ..strokeJoin = StrokeJoin.round
@@ -1624,7 +1668,7 @@ class _EnhancedChartPainter extends CustomPainter {
         point,
         6,
         Paint()
-          ..color = MintColors.deep
+          ..color = color
           ..strokeWidth = 2
           ..style = PaintingStyle.stroke,
       );
@@ -1643,6 +1687,7 @@ class _EnhancedChartPainter extends CustomPainter {
     }
   }
 
+  /// Chart labels: DM Sans.
   void _label(Canvas canvas, String text, Offset offset) {
     TextPainter(
         text: TextSpan(
@@ -1665,6 +1710,7 @@ class _EnhancedChartPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _EnhancedChartPainter oldDelegate) =>
       oldDelegate.values != values ||
+      oldDelegate.color != color ||
       oldDelegate.selectedIndex != selectedIndex ||
       oldDelegate.drawProgress != drawProgress;
 }
@@ -1768,16 +1814,14 @@ class _PurchaseCalculatorSheetState extends State<PurchaseCalculatorSheet> {
                 children: [
                   Text(
                     'WORTH AT TODAY’S FIXING',
-                    style: MintText.label(color: MintColors.slabTint)
-                        .copyWith(fontWeight: FontWeight.w600),
+                    style: MintText.label(color: MintColors.slabTint),
                   ),
                   const SizedBox(height: 10),
                   goldPerTola == 0
                       ? Text(
                           'Gold not weighed yet.',
-                          style: MintText.serif(
-                            size: 20,
-                            italic: true,
+                          style: MintText.head(
+                            size: 18,
                             color: MintColors.stock,
                           ),
                         )
@@ -1963,14 +2007,20 @@ class _AlertFormSheetState extends State<AlertFormSheet> {
             const SizedBox(height: 6),
             DropdownButtonFormField<String>(
               initialValue: _rateId,
-              style: MintText.serif(size: 15),
+              style: MintText.mono(size: 15, weight: FontWeight.w500),
               dropdownColor: MintColors.stock,
               borderRadius: BorderRadius.circular(12),
               items: widget.rates
                   .map(
                     (rate) => DropdownMenuItem(
                       value: rate.id,
-                      child: Text(rate.name),
+                      child: Row(
+                        children: [
+                          CurrencyDot(id: rate.id),
+                          const SizedBox(width: 10),
+                          Text(rate.name),
+                        ],
+                      ),
                     ),
                   )
                   .toList(),
