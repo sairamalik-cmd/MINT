@@ -1,7 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:mint_rate_tracker/main.dart';
+import 'package:mint/main.dart';
 
 /// The mock's phone: 390 x 844 logical pixels.
 void usePhone(WidgetTester tester) {
@@ -15,7 +15,7 @@ void main() {
     usePhone(tester);
     await tester.pumpWidget(const MintApp());
 
-    expect(find.text('Mint'), findsOneWidget);
+    expect(find.text('MINT'), findsOneWidget);
     expect(find.text('GOLD 24K · PER TOLA'), findsOneWidget);
   });
 

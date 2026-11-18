@@ -1,4 +1,4 @@
-package com.example.mint_rate_tracker
+package com.mint.app
 
 import io.flutter.embedding.android.FlutterActivity
 

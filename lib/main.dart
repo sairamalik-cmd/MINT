@@ -913,7 +913,7 @@ class _ScreenHead extends StatelessWidget {
   }
 }
 
-/// "Mint" in DM Serif Display Italic, poured from spearmint into matcha.
+/// MINT wordmark with the matching MINT coin mark.
 class MintWordmark extends StatelessWidget {
   const MintWordmark({this.size = 54, super.key});
 
@@ -923,25 +923,22 @@ class MintWordmark extends StatelessWidget {
   Widget build(BuildContext context) {
     return Align(
       alignment: Alignment.bottomLeft,
-      child: ShaderMask(
-        blendMode: BlendMode.srcIn,
-        shaderCallback: (bounds) => const LinearGradient(
-          colors: [
-            Color(0xFF1D6650),
-            Color(0xFF1F6A4F),
-            Color(0xFF3F6A22),
-            Color(0xFF4C6A1B),
-          ],
-          stops: [0, .4, .78, 1],
-        ).createShader(bounds),
-        child: Padding(
-          padding: const EdgeInsets.only(right: 6, bottom: 4),
-          child: Text(
-            'Mint',
-            style: MintText.logo(size: size, color: Colors.white),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Image.asset(
+            'assets/mint_logo.png',
+            width: size * .78,
+            height: size * .78,
+          ),
+          SizedBox(width: size * .08),
+          Text(
+            'MINT',
+            style: MintText.logo(size: size * .48, color: MintColors.deep),
             semanticsLabel: 'MINT',
           ),
-        ),
+        ],
       ),
     );
   }
