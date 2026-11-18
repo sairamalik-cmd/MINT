@@ -927,11 +927,11 @@ class MintWordmark extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Image.asset('assets/mint_logo.png', width: 34, height: 34),
-          const SizedBox(width: 6),
+          Image.asset('assets/mint_logo.png', width: 24, height: 24),
+          const SizedBox(width: 4),
           Text(
             'MINT',
-            style: MintText.logo(size: 17, color: MintColors.deep),
+            style: MintText.logo(size: 12, color: MintColors.deep),
             semanticsLabel: 'MINT',
           ),
         ],
